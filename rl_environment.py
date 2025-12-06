@@ -37,6 +37,7 @@ class MaskingEnv(gym.Env):
         
         self.step_count = 0
         self.max_steps = self.num_masked
+    
     def reset(self):
         self.current_mask = torch.zeros(self.H8 * self.W8, dtype=torch.bool, device=self.device)
         self.state = np.zeros((self.n_patches_h, self.n_patches_w), dtype=np.float32)

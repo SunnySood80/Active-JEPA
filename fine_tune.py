@@ -30,6 +30,8 @@ from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingWarmRestarts
 from torch.amp import GradScaler, autocast
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend - CRITICAL for DDP to prevent hanging
 import matplotlib.pyplot as plt
 
 from MaskJEPA import MaskJEPA2D
@@ -95,13 +97,18 @@ QUICK_TEST = True  # Set to True for quick test with limited data
 ade_train_dataset = ADE20KDataset(split="training")
 ade_val_dataset = ADE20KDataset(split="validation")
 
-# Quick test mode - limit datasets to small subsets
+# Quick test mode - use quarter of each dataset
 if QUICK_TEST:
-    ade_train_dataset = Subset(ade_train_dataset, range(min(500, len(ade_train_dataset))))
-    ade_val_dataset = Subset(ade_val_dataset, range(min(100, len(ade_val_dataset))))
+    train_full_size = len(ade_train_dataset)
+    val_full_size = len(ade_val_dataset)
+    train_quarter_size = train_full_size // 4
+    val_quarter_size = val_full_size // 4
+    ade_train_dataset = Subset(ade_train_dataset, range(train_quarter_size))
+    ade_val_dataset = Subset(ade_val_dataset, range(val_quarter_size))
     if is_main_process:
-        print(f"QUICK TEST MODE: Limited train dataset to {len(ade_train_dataset)} samples")
-        print(f"QUICK TEST MODE: Limited val dataset to {len(ade_val_dataset)} samples")
+        print(f"QUICK TEST MODE: Using quarter datasets")
+        print(f"  Train: {len(ade_train_dataset):,} / {train_full_size:,} samples")
+        print(f"  Val: {len(ade_val_dataset):,} / {val_full_size:,} samples")
 
 if world_size > 1:
     train_sampler = DistributedSampler(ade_train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -221,11 +228,18 @@ def visualize_segmentation(images, true_masks, logits, epoch, save_path, num_sam
     fig, axes = plt.subplots(3, num_samples, figsize=(16, 12))
     mean = torch.tensor([0.485,0.456,0.406], device=images.device).view(3,1,1)
     std  = torch.tensor([0.229,0.224,0.225], device=images.device).view(3,1,1)
-    for i in range(min(num_samples, images.size(0))):
-        img = torch.clamp(images[i]*std + mean, 0, 1).permute(1,2,0).cpu().numpy()
+    
+    # CRITICAL FIX: Transfer entire batch to CPU once, not per-item
+    num_vis = min(num_samples, images.size(0))
+    images_cpu = torch.clamp(images[:num_vis]*std + mean, 0, 1).permute(0,2,3,1).cpu().numpy()
+    true_masks_cpu = true_masks[:num_vis].cpu().numpy()
+    pred_cpu = pred[:num_vis].cpu().numpy()
+    
+    for i in range(num_vis):
+        img = images_cpu[i]
         axes[0,i].imshow(img); axes[0,i].set_title(f"Original {i+1}"); axes[0,i].axis('off')
-        gt = true_masks[i].cpu().numpy(); gt_rgb = np.zeros((*gt.shape,3))
-        pr = pred[i].cpu().numpy();      pr_rgb = np.zeros((*pr.shape,3))
+        gt = true_masks_cpu[i]; gt_rgb = np.zeros((*gt.shape,3))
+        pr = pred_cpu[i];      pr_rgb = np.zeros((*pr.shape,3))
         for cls in range(NUM_CLASSES):
             m1 = (gt==cls); m2 = (pr==cls)
             if m1.any(): gt_rgb[m1] = plt.cm.tab20(cls%20)[:3]
@@ -256,7 +270,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "/home/sks6nv/Projects/RL-JEPA/jepa_rl_training_output/mask_jepa_rl_pretrained_weights.pt"
+weights_path = "/home/sks6nv/Projects/RL-JEPA/jepa_rl_training_output_1337_quick/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     if is_main_process:
         print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
@@ -332,7 +346,7 @@ scheduler = LambdaLR(
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "/home/sks6nv/Projects/RL-JEPA/jepa_finetuning_output_/"
+save_dir = "/home/sks6nv/Projects/RL-JEPA/jepa_finetuning_output_rl_1337_quick/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:

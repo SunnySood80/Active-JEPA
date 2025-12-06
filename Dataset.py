@@ -13,6 +13,7 @@ from math import ceil
 
 # Reproducibility
 seed = 1337
+
 torch.manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)

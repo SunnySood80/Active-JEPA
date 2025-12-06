@@ -29,7 +29,6 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.amp import GradScaler, autocast
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-import os
 import matplotlib.pyplot as plt
 import numpy as np
 import gc
@@ -52,7 +51,7 @@ use_bf16 = torch.cuda.is_bf16_supported()
 
 
 USE_RL_MASKING = False
-QUICK_TEST = False
+QUICK_TEST = True
 
 
 # DDP Setup
@@ -94,9 +93,11 @@ atexit.register(cleanup_ddp)
 jepa_dataset = JEPADataset()
 
 if QUICK_TEST:
-    jepa_dataset = Subset(jepa_dataset, range(min(1000, len(jepa_dataset))))
+    full_size = len(jepa_dataset)
+    quarter_size = full_size // 4
+    jepa_dataset = Subset(jepa_dataset, range(quarter_size))
     if is_main_process:
-        print(f"QUICK TEST MODE: Limited dataset to {len(jepa_dataset)} samples")
+        print(f"QUICK TEST MODE: Using quarter dataset ({len(jepa_dataset):,} / {full_size:,} samples)")
 if world_size > 1:
     train_sampler = DistributedSampler(jepa_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     pretrain_loader = DataLoader(
@@ -184,10 +185,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./jepa_rl_training_output_PPO_1337"
+    save_dir = "./jepa_rl_training_output_1337_quick"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./jepa_training_output"
+    save_dir = "./jepa_training_output_1337_quick"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)
@@ -285,9 +286,6 @@ for epoch in range(num_epochs):
                     avg_episode_length = np.mean([len(ep['actions']) for ep in all_episodes])
                     print(f"RL mask gen time: {rl_time:.2f}s, avg episode length: {avg_episode_length:.1f}")
                 
-                if world_size > 1:
-                    dist.barrier()
-                
                 outputs = model(images, external_fi1_mask=batched_masks)
                 episodes = all_episodes
             else:
@@ -350,16 +348,12 @@ for epoch in range(num_epochs):
             
             real_rewards = calculate_jepa_rewards(episodes, jepa_outputs_for_rl)
             
-            if is_main_process:
-                print(f"Updating RL agent at batch {batch_idx}/{len(pretrain_loader)}")
             update_start = time.time()
             rl_trainer.update_agent(episodes, jepa_outputs_for_rl)
             update_time = time.time() - update_start
-            if is_main_process:
-                print(f"RL update time: {update_time:.2f}s")
             
-            if world_size > 1:
-                dist.barrier()
+            if batch_idx % 10 == 0 and is_main_process:
+                print(f"RL update time: {update_time:.2f}s")
         
         scaler.scale(total_loss).backward()
         
@@ -388,7 +382,7 @@ for epoch in range(num_epochs):
             denoise_sc = (epoch_denoise_loss / (batch_idx + 1))
             total_sc = recon_sc + denoise_sc
             
-            print(f"Batch {batch_idx}/{len(pretrain_loader)} - "
+            print(f"  Batch {batch_idx}/{len(pretrain_loader)} - "
                   f"TotalSc: {total_sc:.4f}, ReconSc: {recon_sc:.4f}, DenoiseSc: {denoise_sc:.4f}")
     
     epoch_loss /= len(pretrain_loader)
@@ -405,13 +399,11 @@ for epoch in range(num_epochs):
     epoch_end_time = time.time()
     epoch_duration = epoch_end_time - epoch_start_time
     if is_main_process:
-        print(f"\n=== End of Epoch {epoch+1}/{num_epochs} Summary ===")
-        print(f"Avg losses - TotalSc: {total_sc_epoch:.4f}, "
+        print(f"  Avg losses - TotalSc: {total_sc_epoch:.4f}, "
               f"ReconSc: {recon_sc_epoch:.4f}, DenoiseSc: {denoise_sc_epoch:.4f}")
-        print(f"LR: {scheduler.get_last_lr()[0]:.2e}")
-        print(f"GPU Memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
-        print(f"Time for epoch {epoch+1}: {epoch_duration/60:.2f} minutes")
-        print("=" * 40)
+        print(f"  LR: {scheduler.get_last_lr()[0]:.2e}")
+        print(f"  GPU Memory: {torch.cuda.memory_allocated()/1e9:.2f}GB")
+        print(f"  Time for epoch {epoch+1}: {epoch_duration/60:.2f} minutes")
         
         with open(csv_path, 'a', newline='') as f:
             writer = csv.writer(f)
