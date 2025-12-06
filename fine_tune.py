@@ -14,6 +14,7 @@ Usage:
 """
 
 # CRITICAL: Set NCCL environment variables BEFORE importing torch
+import argparse
 import os
 os.environ['NCCL_TIMEOUT'] = '7200'              # 2 hours
 os.environ['NCCL_BLOCKING_WAIT'] = '1'           # Synchronous error handling
@@ -21,6 +22,17 @@ os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'    # Better error reporting
 os.environ['NCCL_IB_DISABLE'] = '1'              # Disable InfiniBand
 os.environ['NCCL_SOCKET_NTHREADS'] = '4'         # Reduce overhead
 os.environ['NCCL_NSOCKS_PERTHREAD'] = '4'        # Reduce overhead
+
+# Parse arguments FIRST
+parser = argparse.ArgumentParser(description='Fine-tune MaskJEPA on ADE20K')
+parser.add_argument('--seed', type=int, required=True, help='Random seed for reproducibility')
+parser.add_argument('--quick_test', action='store_true', default=True, help='Use quick test mode (default: True)')
+parser.add_argument('--no_quick_test', dest='quick_test', action='store_false', help='Disable quick test mode')
+args = parser.parse_args()
+
+# SET SEED FIRST - before importing models or creating any stochastic operations
+from utils import set_seed
+set_seed(args.seed)
 
 # NOW import torch and everything else
 import gc, math, numpy as np, atexit, csv, time
@@ -91,7 +103,7 @@ is_main_process = rank == 0
 atexit.register(cleanup_ddp)
 
 # Quick test configuration
-QUICK_TEST = True  # Set to True for quick test with limited data
+QUICK_TEST = args.quick_test
 
 # Create DDP-compatible dataloaders
 ade_train_dataset = ADE20KDataset(split="training")
@@ -270,7 +282,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "/home/sks6nv/Projects/RL-JEPA/jepa_rl_training_output_1337_quick/mask_jepa_rl_pretrained_weights.pt"
+weights_path = "/home/sks6nv/Projects/RL-JEPA/jepa_rl_training_output_42_quick/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     if is_main_process:
         print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
@@ -346,7 +358,7 @@ scheduler = LambdaLR(
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "/home/sks6nv/Projects/RL-JEPA/jepa_finetuning_output_rl_1337_quick/"
+save_dir = "/home/sks6nv/Projects/RL-JEPA/jepa_finetuning_output_rl_42_quick/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:

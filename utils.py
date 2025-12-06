@@ -6,6 +6,54 @@ from typing import Optional
 import numpy as np
 import matplotlib.pyplot as plt
 import math
+import random
+import os
+
+# Global seed variable (set by set_seed())
+_GLOBAL_SEED = None
+
+def set_seed(seed: int):
+    """
+    Set random seed for reproducibility across all libraries.
+    Call this FIRST before importing models or creating any stochastic operations.
+    
+    Seeds:
+    - Python random
+    - NumPy random
+    - PyTorch random (CPU)
+    - PyTorch random (CUDA - all devices)
+    - PyTorch deterministic mode (slower but fully reproducible)
+    - Python hash randomization (for dict/set ordering)
+    
+    Args:
+        seed: Integer seed value
+    """
+    global _GLOBAL_SEED
+    _GLOBAL_SEED = seed
+    
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    
+    # Seed all CUDA devices
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    
+    # Enable deterministic mode (slower but fully reproducible)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    # Set Python hash seed for reproducible dict/set ordering
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    print(f"✓ Seed set to {seed} (Python, NumPy, PyTorch CPU/CUDA, deterministic mode)")
+
+def get_seed() -> int:
+    """Get the current global seed."""
+    if _GLOBAL_SEED is None:
+        raise RuntimeError("Seed not set! Call set_seed() first before any stochastic operations.")
+    return _GLOBAL_SEED
 
 
 def generate_fi1_mask(fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, device='cuda'):
@@ -21,9 +69,13 @@ def generate_fi1_mask(fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int
     # Generate mask
     fi1_mask = torch.zeros(B, H8 * W8, dtype=torch.bool, device=device)
     
+    seed = get_seed()
     for b in range(B):
-        # Randomly select which patches to mask
-        masked_patch_ids = torch.randperm(total_patches, device=device)[:num_masked]
+        # Create generator with seed for reproducible masking (different seed per batch for variety)
+        generator = torch.Generator(device=device)
+        generator.manual_seed(seed + b)  # Offset by batch index for different masks per batch
+        # Randomly select which patches to mask (seeded for reproducibility)
+        masked_patch_ids = torch.randperm(total_patches, device=device, generator=generator)[:num_masked]
         
         for patch_id in masked_patch_ids:
             # Convert patch_id to patch coordinates

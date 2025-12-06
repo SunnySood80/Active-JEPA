@@ -22,6 +22,7 @@ os.environ['NCCL_IB_DISABLE'] = '1'              # Disable InfiniBand
 os.environ['NCCL_SOCKET_NTHREADS'] = '4'         # Reduce overhead
 os.environ['NCCL_NSOCKS_PERTHREAD'] = '4'        # Reduce overhead
 
+import argparse
 import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
@@ -37,6 +38,19 @@ import time   # for epoch timing
 import atexit
 import csv
 
+# Parse arguments FIRST
+parser = argparse.ArgumentParser(description='Train MaskJEPA model')
+parser.add_argument('--seed', type=int, required=True, help='Random seed for reproducibility')
+parser.add_argument('--use_rl', action='store_true', default=True, help='Use RL masking (default: True)')
+parser.add_argument('--no_rl', dest='use_rl', action='store_false', help='Disable RL masking')
+parser.add_argument('--quick_test', action='store_true', default=True, help='Use quick test mode (default: True)')
+parser.add_argument('--no_quick_test', dest='quick_test', action='store_false', help='Disable quick test mode')
+args = parser.parse_args()
+
+# SET SEED FIRST - before importing models or creating any stochastic operations
+from utils import set_seed
+set_seed(args.seed)
+
 from MaskJEPA import MaskJEPA2D
 from utils import visualize_jepa_patch_quality, lr_lambda
 from Dataloader import batch_size_pretrain
@@ -46,12 +60,10 @@ from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from rl_agent import MaskingAgentTrainer, calculate_semantic_coherence, calculate_jepa_rewards
 
-
 use_bf16 = torch.cuda.is_bf16_supported()
 
-
-USE_RL_MASKING = False
-QUICK_TEST = True
+USE_RL_MASKING = args.use_rl
+QUICK_TEST = args.quick_test
 
 
 # DDP Setup
@@ -185,10 +197,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./jepa_rl_training_output_1337_quick"   
+    save_dir = "./jepa_rl_training_output_42_quick"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./jepa_training_output_1337_quick"
+    save_dir = "./jepa_training_output_42_quick"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)

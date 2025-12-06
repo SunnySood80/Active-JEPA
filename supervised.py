@@ -16,6 +16,7 @@ Usage:
 """
 
 # CRITICAL: Set NCCL environment variables BEFORE importing torch
+import argparse
 import os
 os.environ['NCCL_TIMEOUT'] = '7200'              # 2 hours
 os.environ['NCCL_BLOCKING_WAIT'] = '1'           # Synchronous error handling
@@ -23,6 +24,15 @@ os.environ['NCCL_ASYNC_ERROR_HANDLING'] = '1'    # Better error reporting
 os.environ['NCCL_IB_DISABLE'] = '1'              # Disable InfiniBand
 os.environ['NCCL_SOCKET_NTHREADS'] = '4'         # Reduce overhead
 os.environ['NCCL_NSOCKS_PERTHREAD'] = '4'        # Reduce overhead
+
+# Parse arguments FIRST
+parser = argparse.ArgumentParser(description='Supervised baseline training')
+parser.add_argument('--seed', type=int, required=True, help='Random seed for reproducibility')
+args = parser.parse_args()
+
+# SET SEED FIRST - before importing models or creating any stochastic operations
+from utils import set_seed
+set_seed(args.seed)
 
 # NOW import torch and everything else
 import gc, math, numpy as np, atexit, csv, time
