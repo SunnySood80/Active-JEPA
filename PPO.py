@@ -8,7 +8,7 @@ from typing import List, Tuple, Dict
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, obs_shape: Tuple[int, int], action_dim: int, hidden_dim: int = 256):
+    def __init__(self, obs_shape: Tuple[int, int], action_dim: int, hidden_dim: int = 512):
         super().__init__()
         self.obs_h, self.obs_w = obs_shape
         self.input_dim = self.obs_h * self.obs_w
@@ -69,12 +69,12 @@ class PPO:
         self,
         obs_shape: Tuple[int, int],
         action_dim: int,
-        lr: float = 3e-4,
+        lr: float = 5e-4,  # Increased from 3e-4 for faster policy learning
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.01,
+        entropy_coef: float = 0.05,  # Increased from 0.01 to prevent policy collapse (entropy too low!)
         max_grad_norm: float = 0.5,
         n_epochs: int = 2,
         batch_size: int = 64,
@@ -93,10 +93,14 @@ class PPO:
         self.policy = PolicyNetwork(obs_shape, action_dim).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
         
-        # Create generator for reproducible operations (seeded by utils.set_seed())
+        # Create generators for reproducible operations (seeded by utils.set_seed())
         from utils import get_seed
+        # CUDA generator for multinomial sampling (on GPU)
         self.generator = torch.Generator(device=device)
         self.generator.manual_seed(get_seed())
+        # CPU generator for torch.randperm (requires CPU device)
+        self.cpu_generator = torch.Generator(device='cpu')
+        self.cpu_generator.manual_seed(get_seed())
         
     def select_action(self, state: np.ndarray, deterministic: bool = False):
         state_tensor = torch.FloatTensor(state).to(self.device)
@@ -152,8 +156,8 @@ class PPO:
         
         dataset_size = len(states)
         for epoch in range(self.n_epochs):
-            # Use generator for reproducible batch shuffling
-            indices = torch.randperm(dataset_size, generator=self.generator)
+            # Use CPU generator for reproducible batch shuffling (torch.randperm requires CPU generator)
+            indices = torch.randperm(dataset_size, generator=self.cpu_generator)
             
             for start_idx in range(0, dataset_size, self.batch_size):
                 end_idx = min(start_idx + self.batch_size, dataset_size)
@@ -185,7 +189,10 @@ class PPO:
                 
                 self.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                total_grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                # Debug: Print training stats once per train_on_batch call
+                if epoch == 0 and start_idx == 0:
+                    print(f"[RL TRAIN] Policy loss: {policy_loss.item():.6f}, Value loss: {value_loss.item():.6f}, Entropy: {entropy.item():.4f}, Grad norm: {total_grad_norm:.4f}")
                 self.optimizer.step()
     
     def save(self, path: str):

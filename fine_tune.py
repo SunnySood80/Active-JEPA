@@ -34,6 +34,18 @@ args = parser.parse_args()
 from utils import set_seed
 set_seed(args.seed)
 
+# Worker init function to seed each DataLoader worker process
+def worker_init_fn(worker_id):
+    """Seed each DataLoader worker process for reproducible augmentation."""
+    import random
+    import numpy as np
+    import torch
+    from utils import get_seed
+    seed = get_seed() + worker_id  # Different seed per worker, but deterministic
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
 # NOW import torch and everything else
 import gc, math, numpy as np, atexit, csv, time
 import torch, torch.nn as nn, torch.nn.functional as F
@@ -131,7 +143,8 @@ if world_size > 1:
         sampler=train_sampler,
         num_workers=8,
         pin_memory=True,
-        collate_fn=ade_collate
+        collate_fn=ade_collate,
+        worker_init_fn=worker_init_fn
     )
     downstream_val_loader = DataLoader(
         ade_val_dataset,
@@ -139,7 +152,8 @@ if world_size > 1:
         sampler=val_sampler,
         num_workers=8,
         pin_memory=True,
-        collate_fn=ade_collate
+        collate_fn=ade_collate,
+        worker_init_fn=worker_init_fn
     )
 else:
     downstream_train_loader = DataLoader(
@@ -148,7 +162,8 @@ else:
         shuffle=True,
         num_workers=4,
         pin_memory=True,
-        collate_fn=ade_collate
+        collate_fn=ade_collate,
+        worker_init_fn=worker_init_fn
     )
     downstream_val_loader = DataLoader(
         ade_val_dataset,
@@ -156,7 +171,8 @@ else:
         shuffle=False,
         num_workers=4,
         pin_memory=True,
-        collate_fn=ade_collate
+        collate_fn=ade_collate,
+        worker_init_fn=worker_init_fn
     )
 
 if is_main_process:
@@ -358,7 +374,7 @@ scheduler = LambdaLR(
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "/home/sks6nv/Projects/RL-JEPA/jepa_finetuning_output_rl_42_quick/"
+save_dir = "/home/sks6nv/Projects/RL-JEPA/jepa_rl_finetuning_output_42_quick/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:

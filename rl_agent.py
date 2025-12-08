@@ -38,6 +38,16 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32):
             log_probs.append(log_prob)
             values.append(value)
             
+            # Debug: Check if policy is learning (first episode, first action only)
+            if i == 0 and len(actions) == 1:
+                state_tensor = torch.FloatTensor(obs).to(agent.device)
+                action_probs, _ = agent.policy.forward(state_tensor)
+                max_prob = action_probs.max().item()
+                uniform_prob = 1.0 / action_probs.shape[-1]
+                entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
+                is_uniform = abs(max_prob - uniform_prob) < 0.05 * uniform_prob
+                print(f"[RL POLICY] max_prob={max_prob:.4f} (uniform={uniform_prob:.4f}), entropy={entropy:.4f}, still_uniform={is_uniform}")
+            
             obs, reward, done, info = env.step(action)
             rewards.append(reward)
             dones.append(done)
@@ -73,19 +83,13 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
     for i, episode in enumerate(episodes):
         episode_rewards = []
         
-        # Get JEPA outputs for this episode
-        pixel_errors = jepa_outputs['pixel_errors'][i]  # [N] reconstruction errors per pixel
-        feature_maps = jepa_outputs['features'][i]       # [n_patches_h, n_patches_w, D] semantic features
-        mask_indices = jepa_outputs['mask_indices'][i]   # [N] pixel positions that were masked
+        # Get JEPA outputs for this episode (already on CPU from train.py batch transfer)
+        pixel_errors = jepa_outputs['pixel_errors'][i]  # [N] reconstruction errors per pixel (numpy)
+        feature_maps_cpu = jepa_outputs['features'][i]   # [D, H8, W8] already on CPU
+        mask_indices = jepa_outputs['mask_indices'][i]  # [M] already on CPU
         
-        # Transfer feature_maps to CPU once
-        if torch.is_tensor(feature_maps):
-            feature_maps_cpu = feature_maps.detach().cpu().float()
-        else:
-            feature_maps_cpu = feature_maps
-        
-        # Get valid mask indices (filter out padding -1s)
-        valid_indices = mask_indices[mask_indices >= 0].cpu().numpy()
+        # Get valid mask indices (filter out padding -1s) - already on CPU
+        valid_indices = mask_indices[mask_indices >= 0].numpy()
         
         # Create mapping from pixel position → reconstruction error
         pixel_pos_to_error = {}
@@ -93,20 +97,18 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             if idx < len(pixel_errors):
                 pixel_pos_to_error[int(pixel_pos)] = float(pixel_errors[idx])
         
-        # ✅ GET GRID DIMENSIONS FROM FEATURE_MAPS (NOT FROM EPISODE STATES)
-        n_patches_h, n_patches_w = feature_maps_cpu.shape[:2]
+        # ✅ GET GRID DIMENSIONS FROM FEATURE_MAPS
+        # feature_maps shape is [D, H8, W8] where H8, W8 are pixel dimensions at stride 8
         patch_size = 8  # From your environment
-        H8 = n_patches_h * patch_size  # Total height in pixels
-        W8 = n_patches_w * patch_size  # Total width in pixels
+        D, H8, W8 = feature_maps_cpu.shape
+        n_patches_h = H8 // patch_size  # Number of patches vertically
+        n_patches_w = W8 // patch_size  # Number of patches horizontally
         
-        # DEBUG first episode
-        # if i == 0:
-        #     print(f"\n[DEBUG FIXED] Episode {i}:")
-        #     print(f"  Grid: {n_patches_h}x{n_patches_w} patches ({H8}x{W8} pixels)")
-        #     print(f"  Patch size: {patch_size}x{patch_size}")
-        #     print(f"  Total masked pixels: {len(valid_indices)}")
-        #     print(f"  Total actions: {len(episode['actions'])}")
-        #     print(f"  Pixel position range: [{valid_indices.min()}, {valid_indices.max()}]")
+        # CRITICAL OPTIMIZATION: Reshape feature_maps ONCE per episode, not per action
+        # Reshape from [D, H8, W8] to [n_patches_h, n_patches_w, D] by averaging over patch pixels
+        feature_maps_reshaped = feature_maps_cpu.view(D, n_patches_h, patch_size, n_patches_w, patch_size)
+        feature_maps_patches = feature_maps_reshaped.mean(dim=(2, 4))  # [D, n_patches_h, n_patches_w]
+        feature_maps_patches = feature_maps_patches.permute(1, 2, 0)  # [n_patches_h, n_patches_w, D]
         
         # For each action, find its pixels and aggregate their errors
         for j, action in enumerate(episode['actions']):
@@ -152,12 +154,14 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             #     print(f"    Errors found: {len(patch_errors)}/{(h_end-h_start)*(w_end-w_start)} pixels")
             #     print(f"    Mean error: {pixel_reward:.4f}")
             
-            # Semantic coherence
-            semantic_reward = calculate_semantic_coherence(feature_maps_cpu, action)
+            # Semantic coherence (pass already-reshaped feature_maps_patches)
+            semantic_reward = calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w)
             
             # Combined reward
             alpha, beta = get_current_weights()
             final_reward = alpha * pixel_reward + beta * semantic_reward
+            if i == 0 and j < 1:
+                print(f"[RL] Example reward breakdown: Pixel {pixel_reward:.4f} | Semantic {semantic_reward:.4f} | Final {final_reward:.4f}")
             
             episode_rewards.append(final_reward)
         
@@ -166,19 +170,24 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
     return all_rewards
 
 
-def calculate_semantic_coherence(feature_maps, action):
+def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w):
+    """
+    Calculate semantic coherence reward for a given action.
+    
+    Args:
+        feature_maps_patches: [n_patches_h, n_patches_w, D] already reshaped feature maps
+        action: Patch ID
+        n_patches_h: Number of patches vertically
+        n_patches_w: Number of patches horizontally
+    """
     try:
-        # feature_maps should already be on CPU (transferred once before this function is called)
-        # No need to transfer again here
-        
-        n_patches_h, n_patches_w = feature_maps.shape[-2:]
         ph = action // n_patches_w
         pw = action % n_patches_w
         
         if ph >= n_patches_h or pw >= n_patches_w:
             return 0.0
         
-        masked_patch_features = feature_maps[ph, pw]
+        masked_patch_features = feature_maps_patches[ph, pw]
         
         h_start = max(0, ph - 1)
         h_end = min(n_patches_h, ph + 2)
@@ -189,7 +198,7 @@ def calculate_semantic_coherence(feature_maps, action):
         for h in range(h_start, h_end):
             for w in range(w_start, w_end):
                 if h != ph or w != pw:
-                    neighborhood_features.append(feature_maps[h, w])
+                    neighborhood_features.append(feature_maps_patches[h, w])
         
         if len(neighborhood_features) == 0:
             return 0.0
@@ -197,7 +206,12 @@ def calculate_semantic_coherence(feature_maps, action):
         avg_neighbor_features = torch.stack(neighborhood_features).mean(dim=0)
         semantic_score = torch.cosine_similarity(masked_patch_features, avg_neighbor_features, dim=0)
         
-        return float(semantic_score.item())
+        # INVERT: Higher similarity = more predictable = less informative to mask
+        # So reward should be LOW for predictable patches, HIGH for unpredictable ones
+        # Use (1 - similarity) so policy learns to mask unpredictable/hard-to-reconstruct patches
+        inverted_score = 1.0 - semantic_score.item()
+        
+        return float(inverted_score)
     
     except Exception as e:
         print(f"Semantic coherence calculation failed: {e}")
@@ -208,14 +222,16 @@ def get_current_weights(current_step=None, total_steps=None,
                        pixel_weight_multiplier=1.0,
                        semantic_weight_multiplier=1.0):
     
-    alpha = 0.5 * pixel_weight_multiplier
-    beta = 0.5 * semantic_weight_multiplier
+    # Favor pixel rewards more (they're more discriminative)
+    # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
+    alpha = 0.7 * pixel_weight_multiplier
+    beta = 0.3 * semantic_weight_multiplier
     
     total = alpha + beta
     if total > 0:
         alpha, beta = alpha/total, beta/total
     else:
-        alpha, beta = 0.5, 0.5
+        alpha, beta = 0.7, 0.3
     
     return alpha, beta
 
@@ -256,6 +272,20 @@ class MaskingAgentTrainer:
         all_values = []
         all_rewards = []
         all_dones = []
+        
+        # Debug: Check reward variance
+        all_rewards_flat = []
+        for i, episode in enumerate(episodes):
+            episode_rewards = jepa_rewards[i]
+            all_rewards_flat.extend(episode_rewards)
+        
+        if len(all_rewards_flat) > 0:
+            reward_mean = np.mean(all_rewards_flat)
+            reward_std = np.std(all_rewards_flat)
+            reward_min = np.min(all_rewards_flat)
+            reward_max = np.max(all_rewards_flat)
+            if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
+                print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
         
         for i, episode in enumerate(episodes):
             episode_rewards = jepa_rewards[i]
