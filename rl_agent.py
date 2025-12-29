@@ -32,7 +32,8 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32):
         dones = []
 
         while not done:
-            action, log_prob, value = agent.select_action(obs, deterministic=False)
+            available = env.get_available_actions()
+            action, log_prob, value = agent.select_action(obs, available, deterministic=False)
             states.append(obs.copy())
             actions.append(action)
             log_probs.append(log_prob)
@@ -160,8 +161,8 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             # Combined reward
             alpha, beta = get_current_weights()
             final_reward = alpha * pixel_reward + beta * semantic_reward
-            if i == 0 and j < 1:
-                print(f"[RL] Example reward breakdown: Pixel {pixel_reward:.4f} | Semantic {semantic_reward:.4f} | Final {final_reward:.4f}")
+            # if i == 0 and j < 1:
+            #     print(f"[RL] Example reward breakdown: Pixel {pixel_reward:.4f} | Semantic {semantic_reward:.4f} | Final {final_reward:.4f}")
             
             episode_rewards.append(final_reward)
         
@@ -170,7 +171,7 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
     return all_rewards
 
 
-def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w):
+def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w, from_radius=2):
     """
     Calculate semantic coherence reward for a given action.
     
@@ -188,11 +189,13 @@ def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_pa
             return 0.0
         
         masked_patch_features = feature_maps_patches[ph, pw]
+
+        # from_radius is the left right, up and down patches from the selected patch        
         
-        h_start = max(0, ph - 1)
-        h_end = min(n_patches_h, ph + 2)
-        w_start = max(0, pw - 1)
-        w_end = min(n_patches_w, pw + 2)
+        h_start = max(0, ph - from_radius)
+        h_end = min(n_patches_h, ph + from_radius + 1)
+        w_start = max(0, pw - from_radius)
+        w_end = min(n_patches_w, pw + from_radius + 1)
         
         neighborhood_features = []
         for h in range(h_start, h_end):
@@ -206,12 +209,7 @@ def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_pa
         avg_neighbor_features = torch.stack(neighborhood_features).mean(dim=0)
         semantic_score = torch.cosine_similarity(masked_patch_features, avg_neighbor_features, dim=0)
         
-        # INVERT: Higher similarity = more predictable = less informative to mask
-        # So reward should be LOW for predictable patches, HIGH for unpredictable ones
-        # Use (1 - similarity) so policy learns to mask unpredictable/hard-to-reconstruct patches
-        inverted_score = 1.0 - semantic_score.item()
-        
-        return float(inverted_score)
+        return float(semantic_score.item())
     
     except Exception as e:
         print(f"Semantic coherence calculation failed: {e}")
@@ -235,17 +233,6 @@ def get_current_weights(current_step=None, total_steps=None,
     
     return alpha, beta
 
-def rl_generate_mask(agent, fi1_shape, mask_ratio=0.5, patch_size=8, device='cuda'):
-    env = MaskingEnv(fi1_shape, mask_ratio, patch_size, device)
-
-    obs = env.reset()
-    done = False
-    
-    while not done:
-        action, _, _ = agent.select_action(obs, deterministic=True)
-        obs, reward, done, info = env.step(action)
-
-    return env.get_final_mask()
 
 class MaskingAgentTrainer:
 
@@ -284,8 +271,8 @@ class MaskingAgentTrainer:
             reward_std = np.std(all_rewards_flat)
             reward_min = np.min(all_rewards_flat)
             reward_max = np.max(all_rewards_flat)
-            if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
-                print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
+            # if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
+            #     print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
         
         for i, episode in enumerate(episodes):
             episode_rewards = jepa_rewards[i]

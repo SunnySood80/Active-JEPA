@@ -50,31 +50,19 @@ class PolicyNetwork(nn.Module):
     def get_action(self, state, deterministic=False, generator=None):
         with torch.no_grad():
             action_probs, value = self.forward(state)
-            
-            if deterministic:
-                action = torch.argmax(action_probs)
-            else:
-                # Use generator for reproducible sampling via multinomial
-                if generator is not None:
-                    action = torch.multinomial(action_probs, num_samples=1, generator=generator).item()
-                else:
-                    dist = Categorical(action_probs)
-                    action = dist.sample().item()
-                
-        return action, action_probs, value.item()
-
+        return action_probs, value.item()  # Don't sample here, just return probs
 
 class PPO:
     def __init__(
         self,
         obs_shape: Tuple[int, int],
         action_dim: int,
-        lr: float = 5e-4,  # Increased from 3e-4 for faster policy learning
+        lr: float = 3e-4,  # Increased from 3e-4 for faster policy learning
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.05,  # Increased from 0.01 to prevent policy collapse (entropy too low!)
+        entropy_coef: float = 0.03,  # Increased from 0.01 to prevent policy collapse (entropy too low!)
         max_grad_norm: float = 0.5,
         n_epochs: int = 2,
         batch_size: int = 64,
@@ -102,13 +90,31 @@ class PPO:
         self.cpu_generator = torch.Generator(device='cpu')
         self.cpu_generator.manual_seed(get_seed())
         
-    def select_action(self, state: np.ndarray, deterministic: bool = False):
+    def select_action(self, state, available_actions, deterministic=False):
         state_tensor = torch.FloatTensor(state).to(self.device)
-        # Use generator for reproducible action sampling
-        action, action_probs, value = self.policy.get_action(state_tensor, deterministic, generator=self.generator)
         
-        dist = Categorical(action_probs)
+        # Get probabilities only (no action yet)
+        action_probs, value = self.policy.get_action(state_tensor, deterministic, generator=self.generator)
+        
+        # Mask unavailable actions
+        for i in range(len(action_probs)):
+            if i not in available_actions:
+                action_probs[i] = 0
+        
+        action_probs = action_probs / action_probs.sum()  # Normalize
+        
+        # NOW sample from masked probs
+        if deterministic:
+            action = torch.argmax(action_probs).item()
+        else:
+            dist = Categorical(action_probs)
+            action = dist.sample().item()
+        
         log_prob = dist.log_prob(torch.tensor(action, device=self.device)).item()
+
+        if action not in available_actions:
+            print(f"ERROR! Selected action {action} not in available: {available_actions[:10]}...")
+    
         
         return action, log_prob, value
     
@@ -191,8 +197,8 @@ class PPO:
                 loss.backward()
                 total_grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
                 # Debug: Print training stats once per train_on_batch call
-                if epoch == 0 and start_idx == 0:
-                    print(f"[RL TRAIN] Policy loss: {policy_loss.item():.6f}, Value loss: {value_loss.item():.6f}, Entropy: {entropy.item():.4f}, Grad norm: {total_grad_norm:.4f}")
+                # if epoch == 0 and start_idx == 0:
+                #     print(f"[RL TRAIN] Policy loss: {policy_loss.item():.6f}, Value loss: {value_loss.item():.6f}, Entropy: {entropy.item():.4f}, Grad norm: {total_grad_norm:.4f}")
                 self.optimizer.step()
     
     def save(self, path: str):

@@ -51,6 +51,18 @@ args = parser.parse_args()
 from utils import set_seed
 set_seed(args.seed)
 
+# Worker init function to seed each DataLoader worker process
+def worker_init_fn(worker_id):
+    """Seed each DataLoader worker process for reproducible augmentation."""
+    import random
+    import numpy as np
+    import torch
+    from utils import get_seed
+    seed = get_seed() + worker_id  # Different seed per worker, but deterministic
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
 from MaskJEPA import MaskJEPA2D
 from utils import visualize_jepa_patch_quality, lr_lambda
 from Dataloader import batch_size_pretrain
@@ -106,7 +118,7 @@ jepa_dataset = JEPADataset()
 
 if QUICK_TEST:
     full_size = len(jepa_dataset)
-    quarter_size = full_size // 4
+    quarter_size = full_size // 8
     jepa_dataset = Subset(jepa_dataset, range(quarter_size))
     if is_main_process:
         print(f"QUICK TEST MODE: Using quarter dataset ({len(jepa_dataset):,} / {full_size:,} samples)")
@@ -117,6 +129,7 @@ if world_size > 1:
         batch_size=batch_size_pretrain,
         sampler=train_sampler,
         num_workers=12,
+        worker_init_fn=worker_init_fn,
         pin_memory=True,
         collate_fn=jepa_collate
     )
@@ -127,7 +140,8 @@ else:
         shuffle=True,
         num_workers=4,
         pin_memory=True,
-        collate_fn=jepa_collate
+        collate_fn=jepa_collate,
+        worker_init_fn=worker_init_fn
     )
 
 if is_main_process:
@@ -197,10 +211,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./jepa_rl_training_output_42_quick"   
+    save_dir = "./jepa_rl_training_output_1337_quick"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./jepa_training_output_42_quick"
+    save_dir = "./jepa_training_output_1337_quick"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)
@@ -291,7 +305,8 @@ for epoch in range(num_epochs):
                     all_rl_masks.extend(masks)
                     all_episodes.extend(eps)
                 
-                batched_masks = torch.stack(all_rl_masks, dim=0).to(device)
+                # Masks are already on GPU, just stack them (no transfer needed)
+                batched_masks = torch.stack(all_rl_masks, dim=0)
                 
                 rl_time = time.time() - rl_start
                 if batch_idx % 10 == 0 and is_main_process:
@@ -352,10 +367,14 @@ for epoch in range(num_epochs):
                 
                 pixel_errors_batch.append(patch_errors)
             
+            # CRITICAL OPTIMIZATION: Transfer entire batch to CPU ONCE, not per episode
+            features_batch = outputs['fi1_features'].detach().cpu().float()  # [B, D, H8, W8]
+            mask_indices_batch = outputs['mask_indices'].detach().cpu()  # [B, M]
+            
             jepa_outputs_for_rl = {
                 'pixel_errors': pixel_errors_batch,
-                'features': outputs['fi1_features'],
-                'mask_indices': outputs['mask_indices']
+                'features': features_batch,  # Already on CPU
+                'mask_indices': mask_indices_batch  # Already on CPU
             }
             
             real_rewards = calculate_jepa_rewards(episodes, jepa_outputs_for_rl)
@@ -432,7 +451,22 @@ for epoch in range(num_epochs):
             eval_images = eval_batch["images"][:4].to(device)
             
             with autocast(device_type='cuda', enabled=True, dtype=torch.bfloat16 if use_bf16 else torch.float16):
-                eval_outputs = model(eval_images)
+                # CRITICAL FIX: Generate RL masks for evaluation if RL is enabled
+                if USE_RL_MASKING and rl_trainer:
+                    eval_masks, eval_episodes = rl_trainer.generate_masks_for_batch(batch_size=eval_images.shape[0])
+                    eval_batched_masks = torch.stack(eval_masks, dim=0)
+
+                    # PRINT 1: Original mask from env
+                    print(f"ORIGINAL MASK from env - first image sum: {eval_batched_masks[0].sum().item()}")
+                    
+                    eval_outputs = model(eval_images, external_fi1_mask=eval_batched_masks)
+                    
+                    # PRINT 2: Mask after going through model
+                    print(f"MODEL OUTPUT fi1_mask - first image sum: {eval_outputs['fi1_mask'][0].sum().item()}")
+
+                    eval_outputs = model(eval_images, external_fi1_mask=eval_batched_masks)
+                else:
+                    eval_outputs = model(eval_images)
             
             H, W = eval_images.shape[-2:]
             fi1_tile = max(H // (H // 8), 1)
