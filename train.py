@@ -118,7 +118,7 @@ jepa_dataset = JEPADataset()
 
 if QUICK_TEST:
     full_size = len(jepa_dataset)
-    quarter_size = full_size // 8
+    quarter_size = full_size // 4
     jepa_dataset = Subset(jepa_dataset, range(quarter_size))
     if is_main_process:
         print(f"QUICK TEST MODE: Using quarter dataset ({len(jepa_dataset):,} / {full_size:,} samples)")
