@@ -8,10 +8,9 @@ from typing import List, Tuple, Dict
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, obs_shape: Tuple[int, int], action_dim: int, hidden_dim: int = 512):
+    def __init__(self, input_dim: int = 832, action_dim: int = 64, hidden_dim: int = 512):  # Changed obs_shape to input_dim
         super().__init__()
-        self.obs_h, self.obs_w = obs_shape
-        self.input_dim = self.obs_h * self.obs_w
+        self.input_dim = input_dim
         
         self.shared = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
@@ -21,15 +20,16 @@ class PolicyNetwork(nn.Module):
         )
         
         self.policy_head = nn.Linear(hidden_dim, action_dim)
-        
         self.value_head = nn.Linear(hidden_dim, 1)
         
     def forward(self, state):
-        if state.dim() == 2:
+        if state.dim() == 1:
             state = state.unsqueeze(0)
             squeeze_output = True
-        else:
+        elif state.dim() == 2:
             squeeze_output = False
+        else:
+            raise ValueError(f"Invalid state dimension: {state.dim()}")
             
         batch_size = state.shape[0]
         state_flat = state.reshape(batch_size, -1)
@@ -57,14 +57,14 @@ class PPO:
         self,
         obs_shape: Tuple[int, int],
         action_dim: int,
-        lr: float = 3e-4,  # Increased from 3e-4 for faster policy learning
+        lr: float = 5e-4,  # Increased from 3e-4 for faster policy learning
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.2,
+        clip_epsilon: float = 0.3,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.03,  # Increased from 0.01 to prevent policy collapse (entropy too low!)
+        entropy_coef: float = 0.001,  # Increased from 0.01 to prevent policy collapse (entropy too low!)
         max_grad_norm: float = 0.5,
-        n_epochs: int = 2,
+        n_epochs: int = 4,
         batch_size: int = 64,
         device: str = 'cuda'
     ):
@@ -78,7 +78,7 @@ class PPO:
         self.n_epochs = n_epochs
         self.batch_size = batch_size
         
-        self.policy = PolicyNetwork(obs_shape, action_dim).to(device)
+        self.policy = PolicyNetwork().to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
         
         # Create generators for reproducible operations (seeded by utils.set_seed())
@@ -92,7 +92,7 @@ class PPO:
         
     def select_action(self, state, available_actions, deterministic=False):
         state_tensor = torch.FloatTensor(state).to(self.device)
-        
+
         # Get probabilities only (no action yet)
         action_probs, value = self.policy.get_action(state_tensor, deterministic, generator=self.generator)
         

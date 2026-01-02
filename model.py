@@ -5,22 +5,6 @@ import torch.nn.functional as F
 import timm
 from typing import List, Tuple, Optional
 
-# --- PatchEmbed2D: remove undefined pos_embed add (or implement it properly) ---
-class PatchEmbed2D(nn.Module):
-    def __init__(self, in_chans: int, embed_dim: int, patch_size: int):
-        super().__init__()
-        self.patch_size = patch_size
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.norm = nn.LayerNorm(embed_dim)
-
-    def forward(self, x):
-        x = self.proj(x)                              # [B, D, n_h, n_w]
-        B, D, n_h, n_w = x.shape
-        x = x.view(B, D, n_h * n_w).transpose(1, 2)   # [B, P, D]
-        # (no pos_embed here)
-        return self.norm(x)
-
-########################################################
 
 class ContextEncoder2D(nn.Module):
     """
@@ -48,7 +32,6 @@ class ContextEncoder2D(nn.Module):
             dynamic_img_pad=dynamic_img_pad,
         )
         self.embed_dim = self.swin.num_features
-        self.patch_size = 4
 
     def forward(self, x: torch.Tensor):
         """

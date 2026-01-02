@@ -5,7 +5,7 @@ from rl_environment import MaskingEnv
 
 
 def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, device='cuda'):
-    env = MaskingEnv(fi1_shape, mask_ratio, patch_size, device)
+    env = MaskingEnv(fi1_shape, mask_ratio, patch_size, feature_dim=768, device=device)
     
     obs_shape = env.observation_space.shape
     action_dim = env.action_space.n
@@ -18,11 +18,17 @@ def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, device='cud
     return agent, env
 
 
-def collect_episodes_batch(agent, env, fi1_shape, batch_size=32):
+def collect_episodes_batch(agent, env, fi1_shape, batch_size=32, image_features=None):
     episodes = []
 
     for i in range(batch_size):
-        obs = env.reset()
+
+        if image_features is not None:
+            img_features = image_features[i]
+        else:
+            img_features = None
+
+        obs = env.reset(image_features=img_features)
         done = False
         actions = []
         states = []
@@ -155,14 +161,18 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             #     print(f"    Errors found: {len(patch_errors)}/{(h_end-h_start)*(w_end-w_start)} pixels")
             #     print(f"    Mean error: {pixel_reward:.4f}")
             
-            # Semantic coherence (pass already-reshaped feature_maps_patches)
-            semantic_reward = calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w)
-            
             # Combined reward
             alpha, beta = get_current_weights()
+            
+            # Only compute semantic if weight is non-zero
+            if beta > 0:
+                semantic_reward = calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w)
+            else:
+                semantic_reward = 0.0
+            
             final_reward = alpha * pixel_reward + beta * semantic_reward
-            # if i == 0 and j < 1:
-            #     print(f"[RL] Example reward breakdown: Pixel {pixel_reward:.4f} | Semantic {semantic_reward:.4f} | Final {final_reward:.4f}")
+            if i == 0 and j < 1:
+                print(f"[RL] α={alpha:.2f} β={beta:.2f} | Pixel {pixel_reward:.4f} Semantic {semantic_reward:.4f} → Final {final_reward:.4f}")
             
             episode_rewards.append(final_reward)
         
@@ -222,14 +232,14 @@ def get_current_weights(current_step=None, total_steps=None,
     
     # Favor pixel rewards more (they're more discriminative)
     # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
-    alpha = 0.7 * pixel_weight_multiplier
-    beta = 0.3 * semantic_weight_multiplier
+    alpha = 0.3 * pixel_weight_multiplier
+    beta = 0.7 * semantic_weight_multiplier
     
     total = alpha + beta
     if total > 0:
         alpha, beta = alpha/total, beta/total
     else:
-        alpha, beta = 0.7, 0.3
+        alpha, beta = 0.3, 0.7
     
     return alpha, beta
 
@@ -241,10 +251,10 @@ class MaskingAgentTrainer:
         self.agent, self.env = create_custom_ppo_agent(fi1_shape, mask_ratio, patch_size, device)
         self.fi1_shape = fi1_shape
 
-    def generate_masks_for_batch(self, batch_size=32):
+    def generate_masks_for_batch(self, batch_size=32, image_features=None):
 
 
-        episodes = collect_episodes_batch(self.agent, self.env, self.fi1_shape, batch_size)
+        episodes = collect_episodes_batch(self.agent, self.env, self.fi1_shape, batch_size, image_features)
 
         masks = [ep['mask'] for ep in episodes]
 
@@ -271,8 +281,8 @@ class MaskingAgentTrainer:
             reward_std = np.std(all_rewards_flat)
             reward_min = np.min(all_rewards_flat)
             reward_max = np.max(all_rewards_flat)
-            # if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
-            #     print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
+            if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
+                print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
         
         for i, episode in enumerate(episodes):
             episode_rewards = jepa_rewards[i]

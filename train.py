@@ -291,6 +291,9 @@ for epoch in range(num_epochs):
             
             if USE_RL_MASKING and rl_trainer:
                 rl_start = time.time()
+
+                with torch.no_grad():
+                    encoder_features, _ = model.module.context_encoder(images)  # [B, P, D]                
                 
                 actual_batch_size = images.shape[0]
                 rl_sub_batch_size = 8
@@ -300,8 +303,10 @@ for epoch in range(num_epochs):
                 for sub_start in range(0, actual_batch_size, rl_sub_batch_size):
                     sub_end = min(sub_start + rl_sub_batch_size, actual_batch_size)
                     sub_size = sub_end - sub_start
+
+                    sub_features = encoder_features[sub_start:sub_end]
                     
-                    masks, eps = rl_trainer.generate_masks_for_batch(batch_size=sub_size)
+                    masks, eps = rl_trainer.generate_masks_for_batch(batch_size=sub_size, image_features=sub_features)
                     all_rl_masks.extend(masks)
                     all_episodes.extend(eps)
                 
@@ -453,7 +458,10 @@ for epoch in range(num_epochs):
             with autocast(device_type='cuda', enabled=True, dtype=torch.bfloat16 if use_bf16 else torch.float16):
                 # CRITICAL FIX: Generate RL masks for evaluation if RL is enabled
                 if USE_RL_MASKING and rl_trainer:
-                    eval_masks, eval_episodes = rl_trainer.generate_masks_for_batch(batch_size=eval_images.shape[0])
+
+                    eval_encoder_features, _ = model.module.context_encoder(eval_images)  # [4, P, D]
+
+                    eval_masks, eval_episodes = rl_trainer.generate_masks_for_batch(batch_size=eval_images.shape[0],image_features=eval_encoder_features)
                     eval_batched_masks = torch.stack(eval_masks, dim=0)
 
                     # PRINT 1: Original mask from env

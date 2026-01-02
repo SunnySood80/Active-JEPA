@@ -9,8 +9,11 @@ from gym import spaces
 
 
 class MaskingEnv(gym.Env):
-    def __init__(self, fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, device='cuda'):
+    def __init__(self, fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, feature_dim = 768, device='cuda'):
         super(MaskingEnv, self).__init__()
+        
+        self.feature_dim = feature_dim
+        self.global_features = None
 
         B, D, H8, W8 = fi1_shape  # e.g., [B, D, 28, 28]
 
@@ -28,7 +31,13 @@ class MaskingEnv(gym.Env):
         self.num_masked = int(mask_ratio * self.total_patches)
         
         self.action_space = spaces.Discrete(self.total_patches)
-        self.observation_space = spaces.Box(low=0, high=1, shape=(self.n_patches_h, self.n_patches_w), dtype=np.float32)
+
+        print(f"here is the type of self.total_patches: {type(self.total_patches)}")
+        print(f"here is the type of self.feature_dim: {type(self.feature_dim)}")
+
+
+        state_size = self.total_patches + int(self.feature_dim)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_size,), dtype=np.float32)
 
         self.current_mask = None
         self.masked_count = 0
@@ -38,13 +47,27 @@ class MaskingEnv(gym.Env):
         self.step_count = 0
         self.max_steps = self.num_masked
     
-    def reset(self):
+    def reset(self, image_features=None):
         self.current_mask = torch.zeros(self.H8 * self.W8, dtype=torch.bool, device=self.device)
-        self.state = np.zeros((self.n_patches_h, self.n_patches_w), dtype=np.float32)
         self.masked_count = 0
         self.masked_patches = set()
         self.step_count = 0
+        
+        # Store global features
+        if image_features is not None:
+            self.global_features = image_features.mean(dim=0)
+        else:
+            self.global_features = torch.zeros(self.feature_dim, device=self.device)
+        
+        # Convert masked_patches set to tensor (all zeros at start)
+        patch_mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
+        
+        state = torch.cat([patch_mask, self.global_features])
+
+        self.state = state.cpu().numpy()
+
         return self.state
+
 
     def step(self, action):
 
@@ -61,8 +84,7 @@ class MaskingEnv(gym.Env):
         for h in range(h_start, h_end):
             for w in range(w_start, w_end):
                 self.current_mask[h * self.W8 + w] = True
-
-        self.state[ph, pw] = 1
+                
         self.masked_count += 1
         self.masked_patches.add(action)
         done = (self.masked_count >= self.num_masked) or (self.step_count >= self.max_steps)
@@ -77,6 +99,16 @@ class MaskingEnv(gym.Env):
             reward = efficiency_bonus
         else:
             reward = 0.0
+
+        # Convert masked_patches set to tensor
+        patch_mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
+        if len(self.masked_patches) > 0:
+            indices = torch.tensor(list(self.masked_patches), device=self.device)
+            patch_mask[indices] = 1.0
+        
+        state = torch.cat([patch_mask, self.global_features])
+
+        self.state = state.cpu().numpy()
     
         return self.state, reward, done, {}
 
