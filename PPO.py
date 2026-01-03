@@ -57,12 +57,12 @@ class PPO:
         self,
         obs_shape: Tuple[int, int],
         action_dim: int,
-        lr: float = 5e-4,  # Increased from 3e-4 for faster policy learning
+        lr: float = 3e-4,  # Increased from 3e-4 for faster policy learning
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.3,
+        clip_epsilon: float = 0.3, # was 0.3, reduced to prevent big jumps in policy
         value_coef: float = 0.5,
-        entropy_coef: float = 0.001,  # Increased from 0.01 to prevent policy collapse (entropy too low!)
+        entropy_coef: float = 0.001,  # was 0.001, increased to encourage exploration
         max_grad_norm: float = 0.5,
         n_epochs: int = 4,
         batch_size: int = 64,
@@ -92,31 +92,40 @@ class PPO:
         
     def select_action(self, state, available_actions, deterministic=False):
         state_tensor = torch.FloatTensor(state).to(self.device)
-
+        
         # Get probabilities only (no action yet)
         action_probs, value = self.policy.get_action(state_tensor, deterministic, generator=self.generator)
+        
+        # ADD: Clamp to prevent extreme values BEFORE masking
+        action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)
         
         # Mask unavailable actions
         for i in range(len(action_probs)):
             if i not in available_actions:
                 action_probs[i] = 0
         
-        action_probs = action_probs / action_probs.sum()  # Normalize
+        # Normalize with epsilon to prevent NaN
+        action_probs = action_probs / (action_probs.sum() + 1e-10)
+        
+        # ADD: Final clamp after normalization
+        action_probs = torch.clamp(action_probs, min=1e-8)
+        action_probs = action_probs / action_probs.sum()  # Renormalize
+        
+        # Create distribution (needed for both deterministic and non-deterministic)
+        dist = Categorical(action_probs)
         
         # NOW sample from masked probs
         if deterministic:
             action = torch.argmax(action_probs).item()
         else:
-            dist = Categorical(action_probs)
             action = dist.sample().item()
         
         log_prob = dist.log_prob(torch.tensor(action, device=self.device)).item()
-
+        
         if action not in available_actions:
             print(f"ERROR! Selected action {action} not in available: {available_actions[:10]}...")
-    
         
-        return action, log_prob, value
+        return action, log_prob, value.item()
     
     def compute_gae(
         self, 

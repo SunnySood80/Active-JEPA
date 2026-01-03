@@ -211,10 +211,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./jepa_rl_training_output_1337_quick"   
+    save_dir = "./jepa_rl_training_output_1337"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./jepa_training_output_1337_quick"
+    save_dir = "./jepa_training_output_1337"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)

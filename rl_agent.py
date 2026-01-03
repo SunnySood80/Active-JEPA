@@ -232,14 +232,14 @@ def get_current_weights(current_step=None, total_steps=None,
     
     # Favor pixel rewards more (they're more discriminative)
     # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
-    alpha = 0.3 * pixel_weight_multiplier
-    beta = 0.7 * semantic_weight_multiplier
+    alpha = 0.5 * pixel_weight_multiplier
+    beta = 0.5 * semantic_weight_multiplier
     
     total = alpha + beta
     if total > 0:
         alpha, beta = alpha/total, beta/total
     else:
-        alpha, beta = 0.3, 0.7
+        alpha, beta = 0.5, 0.5
     
     return alpha, beta
 
