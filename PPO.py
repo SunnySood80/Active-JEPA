@@ -125,7 +125,7 @@ class PPO:
         if action not in available_actions:
             print(f"ERROR! Selected action {action} not in available: {available_actions[:10]}...")
         
-        return action, log_prob, value.item()
+        return action, log_prob, value
     
     def compute_gae(
         self, 
@@ -167,11 +167,15 @@ class PPO:
         advantages_tensor = torch.FloatTensor(advantages).to(self.device)
         returns_tensor = torch.FloatTensor(returns).to(self.device)
         
+        # ADD: Check for NaN in inputs
+        if torch.isnan(advantages_tensor).any() or torch.isnan(returns_tensor).any():
+            print("WARNING: NaN in advantages or returns! Skipping batch")
+            return
+        
         advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
         
         dataset_size = len(states)
         for epoch in range(self.n_epochs):
-            # Use CPU generator for reproducible batch shuffling (torch.randperm requires CPU generator)
             indices = torch.randperm(dataset_size, generator=self.cpu_generator)
             
             for start_idx in range(0, dataset_size, self.batch_size):
@@ -186,11 +190,19 @@ class PPO:
                 
                 action_probs, values = self.policy(batch_states)
                 
+                # ADD: Clamp action_probs to prevent NaN
+                action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)
+                action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)
+                
                 dist = Categorical(action_probs)
                 log_probs = dist.log_prob(batch_actions)
                 entropy = dist.entropy().mean()
                 
                 ratio = torch.exp(log_probs - batch_old_log_probs)
+                
+                # ADD: Clamp ratio to prevent extreme values
+                ratio = torch.clamp(ratio, 0.01, 100.0)
+                
                 surr1 = ratio * batch_advantages
                 surr2 = torch.clamp(ratio, 1 - self.clip_epsilon, 1 + self.clip_epsilon) * batch_advantages
                 policy_loss = -torch.min(surr1, surr2).mean()
@@ -202,12 +214,27 @@ class PPO:
                 
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
                 
+                # ADD: Check for NaN in loss
+                if torch.isnan(loss).any():
+                    print(f"WARNING: NaN detected in loss! policy_loss={policy_loss.item():.4f}, value_loss={value_loss.item():.4f}, entropy={entropy.item():.4f}")
+                    continue  # Skip this update
+                
                 self.optimizer.zero_grad()
                 loss.backward()
+                
+                # ADD: Check for NaN in gradients
+                has_nan_grad = False
+                for name, param in self.policy.named_parameters():
+                    if param.grad is not None and torch.isnan(param.grad).any():
+                        print(f"WARNING: NaN gradient in {name}")
+                        has_nan_grad = True
+                        break
+                
+                if has_nan_grad:
+                    self.optimizer.zero_grad()
+                    continue  # Skip this update
+                
                 total_grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                # Debug: Print training stats once per train_on_batch call
-                # if epoch == 0 and start_idx == 0:
-                #     print(f"[RL TRAIN] Policy loss: {policy_loss.item():.6f}, Value loss: {value_loss.item():.6f}, Entropy: {entropy.item():.4f}, Grad norm: {total_grad_norm:.4f}")
                 self.optimizer.step()
     
     def save(self, path: str):

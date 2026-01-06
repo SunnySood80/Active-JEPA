@@ -3,6 +3,10 @@ import numpy as np
 from PPO import PPO, ExperienceBuffer
 from rl_environment import MaskingEnv
 
+# Module-level counters for print frequency control
+_collect_batch_counter = 0
+_reward_calc_counter = 0
+
 
 def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, device='cuda'):
     env = MaskingEnv(fi1_shape, mask_ratio, patch_size, feature_dim=768, device=device)
@@ -14,6 +18,7 @@ def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, device='cud
         action_dim=action_dim,
         device=device
     )
+    
     
     return agent, env
 
@@ -45,15 +50,18 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32, image_features=
             log_probs.append(log_prob)
             values.append(value)
             
-            # Debug: Check if policy is learning (first episode, first action only)
+            # Debug: Check if policy is learning (only print every 50 batches, first episode only)
+            global _collect_batch_counter
             if i == 0 and len(actions) == 1:
-                state_tensor = torch.FloatTensor(obs).to(agent.device)
-                action_probs, _ = agent.policy.forward(state_tensor)
-                max_prob = action_probs.max().item()
-                uniform_prob = 1.0 / action_probs.shape[-1]
-                entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
-                is_uniform = abs(max_prob - uniform_prob) < 0.05 * uniform_prob
-                print(f"[RL POLICY] max_prob={max_prob:.4f} (uniform={uniform_prob:.4f}), entropy={entropy:.4f}, still_uniform={is_uniform}")
+                if _collect_batch_counter % 50 == 0:
+                    state_tensor = torch.FloatTensor(obs).to(agent.device)
+                    action_probs, _ = agent.policy.forward(state_tensor)
+                    max_prob = action_probs.max().item()
+                    uniform_prob = 1.0 / action_probs.shape[-1]
+                    entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
+                    is_uniform = abs(max_prob - uniform_prob) < 0.05 * uniform_prob
+                    print(f"[RL POLICY] max_prob={max_prob:.4f} (uniform={uniform_prob:.4f}), entropy={entropy:.4f}, still_uniform={is_uniform}")
+                _collect_batch_counter += 1
             
             obs, reward, done, info = env.step(action)
             rewards.append(reward)
@@ -171,8 +179,11 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
                 semantic_reward = 0.0
             
             final_reward = alpha * pixel_reward + beta * semantic_reward
-            if i == 0 and j < 1:
+            global _reward_calc_counter
+            if i == 0 and j < 1 and _reward_calc_counter % 50 == 0:
                 print(f"[RL] α={alpha:.2f} β={beta:.2f} | Pixel {pixel_reward:.4f} Semantic {semantic_reward:.4f} → Final {final_reward:.4f}")
+            if i == 0 and j < 1:
+                _reward_calc_counter += 1
             
             episode_rewards.append(final_reward)
         
@@ -226,30 +237,31 @@ def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_pa
         return 0.0
 
 
-def get_current_weights(current_step=None, total_steps=None, 
+def get_current_weights(current_stepm=None, total_steps=None, 
                        pixel_weight_multiplier=1.0,
                        semantic_weight_multiplier=1.0):
     
     # Favor pixel rewards more (they're more discriminative)
     # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
-    alpha = 0.5 * pixel_weight_multiplier
-    beta = 0.5 * semantic_weight_multiplier
+    alpha = 8.0 * pixel_weight_multiplier
+    beta = 2.0 * semantic_weight_multiplier
     
     total = alpha + beta
     if total > 0:
         alpha, beta = alpha/total, beta/total
     else:
-        alpha, beta = 0.5, 0.5
+        alpha, beta = 8.0, 2.0
     
     return alpha, beta
 
 
 class MaskingAgentTrainer:
 
-    def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, device='cuda'):
+    def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, evice='cuda'):
         
         self.agent, self.env = create_custom_ppo_agent(fi1_shape, mask_ratio, patch_size, device)
         self.fi1_shape = fi1_shape
+        self._update_counter = 0  # Counter for reducing print frequency
 
     def generate_masks_for_batch(self, batch_size=32, image_features=None):
 
@@ -276,13 +288,16 @@ class MaskingAgentTrainer:
             episode_rewards = jepa_rewards[i]
             all_rewards_flat.extend(episode_rewards)
         
+        # Only print reward stats every 20 updates to reduce spam
         if len(all_rewards_flat) > 0:
             reward_mean = np.mean(all_rewards_flat)
             reward_std = np.std(all_rewards_flat)
             reward_min = np.min(all_rewards_flat)
             reward_max = np.max(all_rewards_flat)
             if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
-                print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
+                if self._update_counter % 20 == 0:
+                    print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
+                self._update_counter += 1
         
         for i, episode in enumerate(episodes):
             episode_rewards = jepa_rewards[i]

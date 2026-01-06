@@ -35,7 +35,7 @@ class MaskingEnv(gym.Env):
         print(f"here is the type of self.total_patches: {type(self.total_patches)}")
         print(f"here is the type of self.feature_dim: {type(self.feature_dim)}")
 
-
+        # globabl features for context
         state_size = self.total_patches + int(self.feature_dim)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_size,), dtype=np.float32)
 
@@ -53,6 +53,7 @@ class MaskingEnv(gym.Env):
         self.masked_patches = set()
         self.step_count = 0
         
+    
         # Store global features
         if image_features is not None:
             self.global_features = image_features.mean(dim=0)

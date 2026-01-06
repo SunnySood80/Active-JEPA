@@ -71,7 +71,7 @@ def _simple_pos_embed_2d(x: torch.Tensor) -> torch.Tensor:
     # Simple embedding: just use x,y coordinates repeated
     pos_embed = torch.stack([xx, yy], dim=0).unsqueeze(0)  # [1, 2, H, W]
     pos_embed = pos_embed.expand(B, -1, -1, -1)            # [B, 2, H, W]
-    
+     
     # Repeat to match channel dimension
     pos_embed = pos_embed.repeat(1, D//2, 1, 1)            # [B, D, H, W]
     if pos_embed.shape[1] < D:
