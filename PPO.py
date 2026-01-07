@@ -62,14 +62,15 @@ class PolicyNetwork(nn.Module):
 class PPO:
     def __init__(
         self,
-        obs_shape: Tuple[int, int],
         action_dim: int,
-        lr: float = 3e-4,  # Increased from 3e-4 for faster policy learning
+        total_patches: int,
+        compressed_feature_dim: int,
+        lr: float = 3e-4,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.3, # was 0.3, reduced to prevent big jumps in policy
+        clip_epsilon: float = 0.3,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.001,  # was 0.001, increased to encourage exploration
+        entropy_coef: float = 0.001,
         max_grad_norm: float = 0.5,
         n_epochs: int = 4,
         batch_size: int = 64,
@@ -86,12 +87,13 @@ class PPO:
         self.batch_size = batch_size
 
 
-        print(f"[DEBUG PPO] env.total_patches = {self.env.total_patches}")
-        print(f"[DEBUG PPO] env.compressed_feature_dim = {self.env.compressed_feature_dim}")
+        self.input_dim = total_patches + (total_patches * compressed_feature_dim)
         
-        self.input_dim = self.env.total_patches + (self.env.total_patches * self.env.compressed_feature_dim)
-        
+        print(f"[DEBUG PPO] total_patches = {total_patches}")
+        print(f"[DEBUG PPO] compressed_feature_dim = {compressed_feature_dim}")
         print(f"[DEBUG PPO] Calculated input_dim = {self.input_dim}")
+        
+        self.policy = PolicyNetwork(input_dim=self.input_dim, action_dim=total_patches, hidden_dim=1024).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
         
         # Create generators for reproducible operations (seeded by utils.set_seed())

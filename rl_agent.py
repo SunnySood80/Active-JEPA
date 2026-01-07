@@ -11,14 +11,12 @@ _reward_calc_counter = 0
 def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, projection_matrix=None, device='cuda'):
     env = MaskingEnv(fi1_shape, mask_ratio, patch_size, projection_matrix=projection_matrix, device=device)
     
-    obs_shape = env.observation_space.shape
-    action_dim = env.action_space.n
     agent = PPO(
-        obs_shape=obs_shape,
-        action_dim=action_dim,
+        action_dim=env.action_space.n,
+        total_patches=env.total_patches,
+        compressed_feature_dim=env.compressed_feature_dim,
         device=device
     )
-    
     
     return agent, env
 
