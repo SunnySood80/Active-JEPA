@@ -256,7 +256,7 @@ global_update = 0
 rl_trainer = None
 if USE_RL_MASKING:
     fi1_shape = (1, 96, 64, 64)
-    rl_trainer = MaskingAgentTrainer(fi1_shape, mask_ratio=0.5, patch_size=8, device=device)
+    rl_trainer = MaskingAgentTrainer(fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=768, compressed_feature_dim=64, device=device)
     if is_main_process:
         print(f"RL masking enabled - trainer initialized on {device} with fi1_shape: {fi1_shape}")
 else:

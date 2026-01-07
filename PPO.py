@@ -5,13 +5,20 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import numpy as np
 from typing import List, Tuple, Dict
+from rl_environment import MaskingEnv
 
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, input_dim: int = 832, action_dim: int = 64, hidden_dim: int = 512):  # Changed obs_shape to input_dim
+    def __init__(self, input_dim=None, action_dim=None, hidden_dim=None):  # Changed obs_shape to input_dim
         super().__init__()
-        self.input_dim = input_dim
-        
+
+        if input_dim is not None and action_dim is not None and hidden_dim is not None:
+            self.input_dim = input_dim
+            self.action_dim = action_dim
+            self.hidden_dim = hidden_dim
+        else:
+            raise ValueError("input_dim, action_dim, and hidden_dim must be provided")
+
         self.shared = nn.Sequential(
             nn.Linear(self.input_dim, hidden_dim),
             nn.ReLU(),
@@ -77,8 +84,14 @@ class PPO:
         self.max_grad_norm = max_grad_norm
         self.n_epochs = n_epochs
         self.batch_size = batch_size
+
+
+        print(f"[DEBUG PPO] env.total_patches = {self.env.total_patches}")
+        print(f"[DEBUG PPO] env.compressed_feature_dim = {self.env.compressed_feature_dim}")
         
-        self.policy = PolicyNetwork().to(device)
+        self.input_dim = self.env.total_patches + (self.env.total_patches * self.env.compressed_feature_dim)
+        
+        print(f"[DEBUG PPO] Calculated input_dim = {self.input_dim}")
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
         
         # Create generators for reproducible operations (seeded by utils.set_seed())
@@ -89,6 +102,8 @@ class PPO:
         # CPU generator for torch.randperm (requires CPU device)
         self.cpu_generator = torch.Generator(device='cpu')
         self.cpu_generator.manual_seed(get_seed())
+
+        
         
     def select_action(self, state, available_actions, deterministic=False):
         state_tensor = torch.FloatTensor(state).to(self.device)

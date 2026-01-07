@@ -9,11 +9,8 @@ from gym import spaces
 
 
 class MaskingEnv(gym.Env):
-    def __init__(self, fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, feature_dim = 768, device='cuda'):
+    def __init__(self, fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, projection_matrix=None, device='cuda'):
         super(MaskingEnv, self).__init__()
-        
-        self.feature_dim = feature_dim
-        self.global_features = None
 
         B, D, H8, W8 = fi1_shape  # e.g., [B, D, 28, 28]
 
@@ -23,6 +20,10 @@ class MaskingEnv(gym.Env):
         self.W8 = W8
         self.patch_size = patch_size
         self.mask_ratio = mask_ratio
+
+        self.projection_matrix = projection_matrix
+        self.compressed_feature_dim = projection_matrix.shape[1]
+        print(f"here is the shape of the projection matrix: {self.projection_matrix.shape}")
         self.device = device
 
         self.n_patches_h = H8 // patch_size
@@ -31,12 +32,9 @@ class MaskingEnv(gym.Env):
         self.num_masked = int(mask_ratio * self.total_patches)
         
         self.action_space = spaces.Discrete(self.total_patches)
-
-        print(f"here is the type of self.total_patches: {type(self.total_patches)}")
-        print(f"here is the type of self.feature_dim: {type(self.feature_dim)}")
-
-        # globabl features for context
-        state_size = self.total_patches + int(self.feature_dim)
+    
+        # per patch features
+        state_size = self.total_patches + int(self.total_patches * self.compressed_feature_dim)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_size,), dtype=np.float32)
 
         self.current_mask = None
@@ -54,16 +52,18 @@ class MaskingEnv(gym.Env):
         self.step_count = 0
         
     
-        # Store global features
+        # per patch features
         if image_features is not None:
-            self.global_features = image_features.mean(dim=0)
+            compressed_features = image_features @ self.projection_matrix
         else:
-            self.global_features = torch.zeros(self.feature_dim, device=self.device)
+            compressed_features = torch.zeros(self.total_patches, self.compressed_feature_dim, device=self.device)
         
+
+        self.compressed_features = compressed_features
         # Convert masked_patches set to tensor (all zeros at start)
         patch_mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
         
-        state = torch.cat([patch_mask, self.global_features])
+        state = torch.cat([patch_mask, self.compressed_features.flatten()])
 
         self.state = state.cpu().numpy()
 
@@ -107,7 +107,7 @@ class MaskingEnv(gym.Env):
             indices = torch.tensor(list(self.masked_patches), device=self.device)
             patch_mask[indices] = 1.0
         
-        state = torch.cat([patch_mask, self.global_features])
+        state = torch.cat([patch_mask, self.compressed_features.flatten()])
 
         self.state = state.cpu().numpy()
     

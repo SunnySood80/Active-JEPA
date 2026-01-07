@@ -8,8 +8,8 @@ _collect_batch_counter = 0
 _reward_calc_counter = 0
 
 
-def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, device='cuda'):
-    env = MaskingEnv(fi1_shape, mask_ratio, patch_size, feature_dim=768, device=device)
+def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, projection_matrix=None, device='cuda'):
+    env = MaskingEnv(fi1_shape, mask_ratio, patch_size, projection_matrix=projection_matrix, device=device)
     
     obs_shape = env.observation_space.shape
     action_dim = env.action_space.n
@@ -257,9 +257,15 @@ def get_current_weights(current_stepm=None, total_steps=None,
 
 class MaskingAgentTrainer:
 
-    def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, evice='cuda'):
+    def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=None, compressed_feature_dim=None, device='cuda'):
         
-        self.agent, self.env = create_custom_ppo_agent(fi1_shape, mask_ratio, patch_size, device)
+        if feature_dim is not None and compressed_feature_dim is not None:
+            self.feature_dim = feature_dim
+            self.compressed_feature_dim = compressed_feature_dim
+            self.projection_matrix = (torch.randn(self.feature_dim, self.compressed_feature_dim, requires_grad=False) / np.sqrt(self.feature_dim)).to(device)
+        else:
+            self.projection_matrix = None
+        self.agent, self.env = create_custom_ppo_agent(fi1_shape, mask_ratio, patch_size, projection_matrix=self.projection_matrix, device=device)
         self.fi1_shape = fi1_shape
         self._update_counter = 0  # Counter for reducing print frequency
 
