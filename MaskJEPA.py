@@ -6,6 +6,7 @@ import time
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+from utils import get_seed, generate_noise_seeded
 
 # Import modules from model.py
 from model import ContextEncoder2D, PixelDecoder2D, Predictor2D
@@ -95,15 +96,12 @@ class MaskJEPA2D(nn.Module):
         s_last = 4
         H4, W4 = H // s_last, W // s_last
         sigma = 0.4
-    
-        # Seed noise generation for reproducibility
-        from utils import get_seed
-        generator = torch.Generator(device=device)
-        generator.manual_seed(get_seed())
-        eps_lr = torch.randn(B, C, H4, W4, device=device, dtype=x.dtype, generator=generator) * sigma
+        
+        # Generate noise with varying seed (reproducible but different each forward pass)
+        eps_lr = generate_noise_seeded((B, C, H4, W4), sigma=sigma, device=device, dtype=x.dtype)
         eps_full = eps_lr.repeat_interleave(s_last, dim=2).repeat_interleave(s_last, dim=3)
         x_noisy = x + eps_full
-    
+
         # ---------- (B) ONLINE BRANCH ----------
         tokens_online, (enc_h, enc_w) = self.context_encoder(x_noisy)  # [B,P,D], (Ht,Wt)
         feat_online = tokens_online.transpose(1, 2).reshape(

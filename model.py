@@ -242,9 +242,6 @@ class Predictor2D(nn.Module):
                  embed_dim: int,
                  num_queries: int,
                  num_heads: int = None,
-                 # accept both old and new arg names:
-                 num_cross_blocks: int = None,
-                 num_self_blocks: int = None,
                  num_cross_attn: int = None,
                  num_self_attn: int = None):
         super().__init__()
@@ -260,19 +257,16 @@ class Predictor2D(nn.Module):
         assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
         self.num_heads = num_heads
 
-        # harmonize naming: prefer *attn if provided, else *blocks, else paper defaults (9/2)
+
         if num_cross_attn is not None:
-            L = num_cross_attn
-        elif num_cross_blocks is not None:
-            L = num_cross_blocks
+            self.num_cross_attn = num_cross_attn
         else:
-            L = 9
+            self.num_cross_attn = 2
+        
         if num_self_attn is not None:
-            M = num_self_attn
-        elif num_self_blocks is not None:
-            M = num_self_blocks
+            self.num_self_attn = num_self_attn
         else:
-            M = 2
+            self.num_self_attn = 1
 
         # learnable queries
         self.query_embed = nn.Parameter(torch.zeros(1, num_queries, embed_dim))
@@ -290,13 +284,13 @@ class Predictor2D(nn.Module):
                 ),
                 norm1 = nn.LayerNorm(embed_dim),
                 norm2 = nn.LayerNorm(embed_dim),
-            )) for _ in range(L)
+            )) for _ in range(self.num_cross_attn)
         ])
 
         # Extra self-attention blocks on queries
         self.self_blocks = nn.ModuleList([
             nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, batch_first=True)
-            for _ in range(M)
+            for _ in range(self.num_self_attn)
         ])
 
         # projection head f_L to map query outputs back to Fi1 embedding space

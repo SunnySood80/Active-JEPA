@@ -24,6 +24,8 @@ class PolicyNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
         )
         
         self.policy_head = nn.Linear(hidden_dim, action_dim)
@@ -93,7 +95,7 @@ class PPO:
         print(f"[DEBUG PPO] compressed_feature_dim = {compressed_feature_dim}")
         print(f"[DEBUG PPO] Calculated input_dim = {self.input_dim}")
         
-        self.policy = PolicyNetwork(input_dim=self.input_dim, action_dim=total_patches, hidden_dim=1024).to(device)
+        self.policy = PolicyNetwork(input_dim=self.input_dim, action_dim=total_patches, hidden_dim=4064).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
         
         # Create generators for reproducible operations (seeded by utils.set_seed())

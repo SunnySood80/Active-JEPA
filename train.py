@@ -118,7 +118,7 @@ jepa_dataset = JEPADataset()
 
 if QUICK_TEST:
     full_size = len(jepa_dataset)
-    quarter_size = full_size // 4
+    quarter_size = full_size // 8
     jepa_dataset = Subset(jepa_dataset, range(quarter_size))
     if is_main_process:
         print(f"QUICK TEST MODE: Using quarter dataset ({len(jepa_dataset):,} / {full_size:,} samples)")
@@ -211,10 +211,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./quick_test/jepa_rl_training_output_1337_quick"   
+    save_dir = "./quick_test/jepa_rl_training_output_7_quick_8"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./quick_test/jepa_training_output_1337_quick"
+    save_dir = "./quick_test/jepa_training_output_7_quick_8"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)
@@ -293,7 +293,28 @@ for epoch in range(num_epochs):
                 rl_start = time.time()
 
                 with torch.no_grad():
-                    encoder_features, _ = model.module.context_encoder(images)  # [B, P, D]                
+                        encoder_features, _ = model.module.context_encoder(images)  # [B, num_patches, feat_dim]
+    
+                        # Get dimensions dynamically
+                        B, num_patches, feat_dim = encoder_features.shape
+                        patches_per_side = int(np.sqrt(num_patches))  # e.g., 16 if 256 patches
+                        
+                        # Get target from env (e.g., 8 for 8x8=64 patches)
+                        target_patches_per_side = int(np.sqrt(rl_trainer.env.total_patches))
+                        
+                        # Calculate pooling factor
+                        pool_factor = patches_per_side // target_patches_per_side
+                        
+                        # Reshape and pool to target size
+                        encoder_features = encoder_features.reshape(B, patches_per_side, patches_per_side, feat_dim)
+                        encoder_features = F.avg_pool2d(
+                            encoder_features.permute(0, 3, 1, 2),  # [B, feat_dim, patches_per_side, patches_per_side]
+                            kernel_size=pool_factor
+                        ).permute(0, 2, 3, 1)  # [B, target_patches_per_side, target_patches_per_side, feat_dim]
+                        encoder_features = encoder_features.reshape(B, rl_trainer.env.total_patches, feat_dim)
+                        
+                        # Compress with projection matrix
+                        encoder_features = encoder_features @ rl_trainer.projection_matrix                
                 
                 actual_batch_size = images.shape[0]
                 rl_sub_batch_size = 8
@@ -459,9 +480,25 @@ for epoch in range(num_epochs):
                 # CRITICAL FIX: Generate RL masks for evaluation if RL is enabled
                 if USE_RL_MASKING and rl_trainer:
 
-                    eval_encoder_features, _ = model.module.context_encoder(eval_images)  # [4, P, D]
+                    eval_encoder_features, _ = model.module.context_encoder(eval_images)  # [4, 256, 768]
+                    
+                    # ADD: Same reshaping as training
+                    B, num_patches, feat_dim = eval_encoder_features.shape
+                    patches_per_side = int(np.sqrt(num_patches))
+                    target_patches_per_side = int(np.sqrt(rl_trainer.env.total_patches))
+                    pool_factor = patches_per_side // target_patches_per_side
+                    
+                    eval_encoder_features = eval_encoder_features.reshape(B, patches_per_side, patches_per_side, feat_dim)
+                    eval_encoder_features = F.avg_pool2d(
+                        eval_encoder_features.permute(0, 3, 1, 2),
+                        kernel_size=pool_factor
+                    ).permute(0, 2, 3, 1)
+                    eval_encoder_features = eval_encoder_features.reshape(B, rl_trainer.env.total_patches, feat_dim)
+                    
+                    # Compress
+                    eval_encoder_features = eval_encoder_features @ rl_trainer.projection_matrix
 
-                    eval_masks, eval_episodes = rl_trainer.generate_masks_for_batch(batch_size=eval_images.shape[0],image_features=eval_encoder_features)
+                    eval_masks, eval_episodes = rl_trainer.generate_masks_for_batch(batch_size=eval_images.shape[0], image_features=eval_encoder_features)
                     eval_batched_masks = torch.stack(eval_masks, dim=0)
 
                     # PRINT 1: Original mask from env

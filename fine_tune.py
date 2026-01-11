@@ -125,8 +125,8 @@ ade_val_dataset = ADE20KDataset(split="validation")
 if QUICK_TEST:
     train_full_size = len(ade_train_dataset)
     val_full_size = len(ade_val_dataset)
-    train_quarter_size = train_full_size // 4
-    val_quarter_size = val_full_size // 4
+    train_quarter_size = train_full_size // 8
+    val_quarter_size = val_full_size // 8
     ade_train_dataset = Subset(ade_train_dataset, range(train_quarter_size))
     ade_val_dataset = Subset(ade_val_dataset, range(val_quarter_size))
     if is_main_process:
@@ -298,7 +298,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "./quick_test/jepa_training_output_1337_quick/mask_jepa_pretrained_weights.pt"
+weights_path = "./quick_test/jepa_rl_training_output_100_quick/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     if is_main_process:
         print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
@@ -374,7 +374,7 @@ scheduler = LambdaLR(
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "./quick_test/jepa_finetuning_output_1337_quick/"
+save_dir = "./quick_test/jepa_rl_finetuning_output_100_quick/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:

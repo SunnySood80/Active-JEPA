@@ -50,24 +50,21 @@ class MaskingEnv(gym.Env):
         self.masked_count = 0
         self.masked_patches = set()
         self.step_count = 0
-        
-    
-        # per patch features
+         
+        # Features are ALREADY compressed in train.py, just use them
         if image_features is not None:
-            compressed_features = image_features @ self.projection_matrix
+            #print(f"[ENV DEBUG] image_features shape: {image_features.shape}")
+            self.compressed_features = image_features  # Already [64, 64], don't compress again!
         else:
-            compressed_features = torch.zeros(self.total_patches, self.compressed_feature_dim, device=self.device)
+            self.compressed_features = torch.zeros(self.total_patches, self.compressed_feature_dim, device=self.device)
         
-
-        self.compressed_features = compressed_features
-        # Convert masked_patches set to tensor (all zeros at start)
+        # Build state
         patch_mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
-        
         state = torch.cat([patch_mask, self.compressed_features.flatten()])
-
-        self.state = state.cpu().numpy()
-
-        return self.state
+        
+        #print(f"[ENV DEBUG] final state shape: {state.shape}")
+        
+        return state.cpu().numpy()
 
 
     def step(self, action):

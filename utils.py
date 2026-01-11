@@ -11,6 +11,9 @@ import os
 
 # Global seed variable (set by set_seed())
 _GLOBAL_SEED = None
+# Global counter for stochastic operations to ensure variety across calls
+_MASK_GENERATION_COUNTER = 0
+_NOISE_GENERATION_COUNTER = 0
 
 def set_seed(seed: int):
     """
@@ -52,11 +55,29 @@ def set_seed(seed: int):
 def get_seed() -> int:
     """Get the current global seed."""
     if _GLOBAL_SEED is None:
-        raise RuntimeError("Seed not set! Call set_seed() first before any stochastic operations.")
+        raise RuntimeError("Seed not set! Call set_seed() first so before any stochastic operations.")
     return _GLOBAL_SEED
+
+def generate_noise_seeded(shape, sigma=0.4, device='cuda', dtype=torch.float32):
+    """
+    Generate Gaussian noise with reproducible seeding that varies across calls.
+    This ensures different noise patterns each time while maintaining reproducibility.
+    """
+    global _NOISE_GENERATION_COUNTER
+    
+    generator = torch.Generator(device=device)
+    seed = get_seed()
+    # Use counter so noise changes across forward passes
+    generator.manual_seed(seed + _NOISE_GENERATION_COUNTER * 50000)
+    
+    noise = torch.randn(*shape, device=device, dtype=dtype, generator=generator) * sigma
+    _NOISE_GENERATION_COUNTER += 1
+    return noise
 
 
 def generate_fi1_mask(fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, device='cuda'):
+    global _MASK_GENERATION_COUNTER
+    
     B, D, H8, W8 = fi1_shape  # e.g., [B, D, 28, 28] for 224x224 images
     
     # Calculate number of patches
@@ -71,9 +92,10 @@ def generate_fi1_mask(fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int
     
     seed = get_seed()
     for b in range(B):
-        # Create generator with seed for reproducible masking (different seed per batch for variety)
+        # Create generator with seed for reproducible masking
         generator = torch.Generator(device=device)
-        generator.manual_seed(seed + b)  # Offset by batch index for different masks per batch
+        # FIX: Use global counter so masks vary across calls while remaining reproducible
+        generator.manual_seed(seed + _MASK_GENERATION_COUNTER * 10000 + b)
         # Randomly select which patches to mask (seeded for reproducibility)
         masked_patch_ids = torch.randperm(total_patches, device=device, generator=generator)[:num_masked]
         
@@ -93,6 +115,7 @@ def generate_fi1_mask(fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int
                 for w in range(w_start, w_end):
                     fi1_mask[b, h * W8 + w] = True
     
+    _MASK_GENERATION_COUNTER += 1  # Increment for next call
     return fi1_mask  # [B, H8*W8]
 
 
