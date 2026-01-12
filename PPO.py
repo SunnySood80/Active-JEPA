@@ -67,7 +67,7 @@ class PPO:
         action_dim: int,
         total_patches: int,
         compressed_feature_dim: int,
-        lr: float = 3e-4,
+        lr: float = 1.5e-4, # was 3e-4
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.3,
