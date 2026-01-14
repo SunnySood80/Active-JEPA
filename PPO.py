@@ -60,14 +60,49 @@ class PolicyNetwork(nn.Module):
         with torch.no_grad():
             action_probs, value = self.forward(state)
         return action_probs, value.item()  # Don't sample here, just return probs
+    
+
+class SmartPolicyNetwork(nn.Module):
+    def __init__(self, feature_dim=768, action_dim=64):
+        super().__init__()
+        self.feature_dim = feature_dim
+        self.action_dim = action_dim
+        
+        # Score each patch independently
+        self.scorer = nn.Linear(feature_dim, 1)
+        
+        # Value head (needs to see all features)
+        self.value_head = nn.Sequential(
+            nn.Linear(feature_dim * action_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1)
+        )
+
+    def forward(self, state_dict):
+        # state_dict: {'mask': [B, 64], 'features': [B, 64, 768]}
+        features = state_dict['features']  # [B, 64, 768]
+        
+        # Score each patch
+        action_logits = self.scorer(features).squeeze(-1)  # [B, 64]
+        action_probs = F.softmax(action_logits, dim=-1)
+        
+        # Value estimate
+        flat_features = features.reshape(features.shape[0], -1)  # [B, 64*768]
+        value = self.value_head(flat_features)  # [B, 1]
+        
+        return action_probs, value
+    
+    def get_action(self, state_dict, deterministic=False, generator=None):
+        with torch.no_grad():
+            action_probs, value = self.forward(state_dict)
+        return action_probs, value
 
 class PPO:
     def __init__(
         self,
-        action_dim: int,
-        total_patches: int,
-        compressed_feature_dim: int,
-        lr: float = 1.5e-4, # was 3e-4
+        action_dim = 64,
+        feature_dim = 768,
+        lr: float = 3e-4, # was 3e-4
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.3,
@@ -88,14 +123,7 @@ class PPO:
         self.n_epochs = n_epochs
         self.batch_size = batch_size
 
-
-        self.input_dim = total_patches + (total_patches * compressed_feature_dim)
-        
-        print(f"[DEBUG PPO] total_patches = {total_patches}")
-        print(f"[DEBUG PPO] compressed_feature_dim = {compressed_feature_dim}")
-        print(f"[DEBUG PPO] Calculated input_dim = {self.input_dim}")
-        
-        self.policy = PolicyNetwork(input_dim=self.input_dim, action_dim=total_patches, hidden_dim=4064).to(device)
+        self.policy = SmartPolicyNetwork(feature_dim=feature_dim, action_dim=action_dim).to(device)
         self.optimizer = torch.optim.Adam(self.policy.parameters(), lr=lr)
         
         # Create generators for reproducible operations (seeded by utils.set_seed())
@@ -110,12 +138,31 @@ class PPO:
         
         
     def select_action(self, state, available_actions, deterministic=False):
-        state_tensor = torch.FloatTensor(state).to(self.device)
+        # state is dict: {'mask': tensor[64], 'features': tensor[64, 768]}
+        # They're already tensors from the environment!
         
-        # Get probabilities only (no action yet)
-        action_probs, value = self.policy.get_action(state_tensor, deterministic, generator=self.generator)
+        # Just ensure they're on the right device and have batch dim
+        if isinstance(state['mask'], torch.Tensor):
+            mask = state['mask'].unsqueeze(0).to(self.device)
+            features = state['features'].unsqueeze(0).to(self.device)
+        else:
+            # If they're numpy arrays (shouldn't be with new env)
+            mask = torch.FloatTensor(state['mask']).unsqueeze(0).to(self.device)
+            features = torch.FloatTensor(state['features']).unsqueeze(0).to(self.device)
         
-        # ADD: Clamp to prevent extreme values BEFORE masking
+        state_dict = {
+            'mask': mask,      # [1, 64]
+            'features': features  # [1, 64, 768]
+        }
+        
+        # Get probabilities from policy
+        action_probs, value = self.policy.get_action(state_dict, deterministic, generator=self.generator)
+        
+        # Remove batch dimension
+        action_probs = action_probs.squeeze(0)  # [64]
+        value = value.squeeze(0).item()  # scalar
+        
+        # Clamp to prevent extreme values
         action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)
         
         # Mask unavailable actions
@@ -123,26 +170,21 @@ class PPO:
             if i not in available_actions:
                 action_probs[i] = 0
         
-        # Normalize with epsilon to prevent NaN
+        # Normalize
         action_probs = action_probs / (action_probs.sum() + 1e-10)
-        
-        # ADD: Final clamp after normalization
         action_probs = torch.clamp(action_probs, min=1e-8)
-        action_probs = action_probs / action_probs.sum()  # Renormalize
+        action_probs = action_probs / action_probs.sum()
         
-        # Create distribution (needed for both deterministic and non-deterministic)
+        # Create distribution
         dist = Categorical(action_probs)
         
-        # NOW sample from masked probs
+        # Sample action
         if deterministic:
             action = torch.argmax(action_probs).item()
         else:
             action = dist.sample().item()
         
         log_prob = dist.log_prob(torch.tensor(action, device=self.device)).item()
-        
-        if action not in available_actions:
-            print(f"ERROR! Selected action {action} not in available: {available_actions[:10]}...")
         
         return action, log_prob, value
     
@@ -174,13 +216,18 @@ class PPO:
     
     def train_on_batch(
         self,
-        states: List[np.ndarray],
+        states: List[Dict],
         actions: List[int],
         old_log_probs: List[float],
         advantages: np.ndarray,
         returns: np.ndarray
     ):
-        states_tensor = torch.FloatTensor(np.array(states)).to(self.device)
+        masks = torch.stack([state['mask'] for state in states]).to(self.device)  # [N, 64]
+        features = torch.stack([state['features'] for state in states]).to(self.device)
+        states_dict = {
+            'mask': masks,
+            'features': features
+        }
         actions_tensor = torch.LongTensor(actions).to(self.device)
         old_log_probs_tensor = torch.FloatTensor(old_log_probs).to(self.device)
         advantages_tensor = torch.FloatTensor(advantages).to(self.device)
@@ -201,7 +248,10 @@ class PPO:
                 end_idx = min(start_idx + self.batch_size, dataset_size)
                 batch_indices = indices[start_idx:end_idx]
                 
-                batch_states = states_tensor[batch_indices]
+                batch_states = {
+                    'mask': states_dict['mask'][batch_indices],
+                    'features': states_dict['features'][batch_indices]
+                }
                 batch_actions = actions_tensor[batch_indices]
                 batch_old_log_probs = old_log_probs_tensor[batch_indices]
                 batch_advantages = advantages_tensor[batch_indices]

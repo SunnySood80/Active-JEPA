@@ -125,8 +125,8 @@ ade_val_dataset = ADE20KDataset(split="validation")
 if QUICK_TEST:  
     train_full_size = len(ade_train_dataset)
     val_full_size = len(ade_val_dataset)
-    train_quarter_size = train_full_size // 8
-    val_quarter_size = val_full_size // 8
+    train_quarter_size = train_full_size // 12
+    val_quarter_size = val_full_size // 12
     ade_train_dataset = Subset(ade_train_dataset, range(train_quarter_size))
     ade_val_dataset = Subset(ade_val_dataset, range(val_quarter_size))
     if is_main_process:
@@ -298,7 +298,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "./quick_test/jepa_rl_training_output_7_quick_8/mask_jepa_rl_pretrained_weights.pt"
+weights_path = "./quick_test/jepa_rl_training_output_1337_quick_12/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     if is_main_process:
         print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
@@ -370,11 +370,11 @@ scheduler = LambdaLR(
     optimizer,
     lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs, min_lr_ratio=0.01)
 )
-
+ 
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "./quick_test/jepa_rl_finetuning_output_7_quick_8/"
+save_dir = "./quick_test/jepa_rl_finetuning_output_1337_quick_12/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:
@@ -401,8 +401,8 @@ train_ce_hist, val_ce_hist, val_miou_hist = [], [], []
 # Performance optimizations
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True  
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.deterministic = False  # Better performance
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # Access base model for saving
 base_model = model.module if hasattr(model, 'module') else model

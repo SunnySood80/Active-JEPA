@@ -118,7 +118,7 @@ jepa_dataset = JEPADataset()
 
 if QUICK_TEST:
     full_size = len(jepa_dataset)
-    quarter_size = full_size // 8
+    quarter_size = full_size // 12
     jepa_dataset = Subset(jepa_dataset, range(quarter_size))
     if is_main_process:
         print(f"QUICK TEST MODE: Using quarter dataset ({len(jepa_dataset):,} / {full_size:,} samples)")
@@ -159,9 +159,10 @@ early_stop_patience = 15
 best_total_sc = float('inf')
 epochs_no_improve = 0
 
-torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True  
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 
 def enable_gradient_checkpointing(model):
@@ -211,10 +212,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./quick_test/jepa_rl_training_output_7_quick_8"   
+    save_dir = "./quick_test/jepa_rl_training_output_1337_quick_12"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./quick_test/jepa_training_output_7_quick_8"
+    save_dir = "./quick_test/jepa_training_output_1337_quick_12"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)
@@ -256,7 +257,7 @@ global_update = 0
 rl_trainer = None
 if USE_RL_MASKING:
     fi1_shape = (1, 96, 64, 64)
-    rl_trainer = MaskingAgentTrainer(fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=768, compressed_feature_dim=64, device=device)
+    rl_trainer = MaskingAgentTrainer(fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=768, device=device)
     if is_main_process:
         print(f"RL masking enabled - trainer initialized on {device} with fi1_shape: {fi1_shape}")
 else:
@@ -311,11 +312,8 @@ for epoch in range(num_epochs):
                             encoder_features.permute(0, 3, 1, 2),  # [B, feat_dim, patches_per_side, patches_per_side]
                             kernel_size=pool_factor
                         ).permute(0, 2, 3, 1)  # [B, target_patches_per_side, target_patches_per_side, feat_dim]
-                        encoder_features = encoder_features.reshape(B, rl_trainer.env.total_patches, feat_dim)
-                        
-                        # Compress with projection matrix
-                        encoder_features = encoder_features @ rl_trainer.projection_matrix                
-                
+                        encoder_features = encoder_features.reshape(B, rl_trainer.env.total_patches, feat_dim)               
+                 
                 actual_batch_size = images.shape[0]
                 rl_sub_batch_size = 8
                 all_rl_masks = []
@@ -494,9 +492,6 @@ for epoch in range(num_epochs):
                         kernel_size=pool_factor
                     ).permute(0, 2, 3, 1)
                     eval_encoder_features = eval_encoder_features.reshape(B, rl_trainer.env.total_patches, feat_dim)
-                    
-                    # Compress
-                    eval_encoder_features = eval_encoder_features @ rl_trainer.projection_matrix
 
                     eval_masks, eval_episodes = rl_trainer.generate_masks_for_batch(batch_size=eval_images.shape[0], image_features=eval_encoder_features)
                     eval_batched_masks = torch.stack(eval_masks, dim=0)

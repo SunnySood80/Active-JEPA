@@ -290,7 +290,7 @@ if world_size > 1:
         print("Converted BatchNorm to SyncBatchNorm for multi-GPU training")
     
     # Wrap with DDP - FIXED DEVICE IDS
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=False)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
     if is_main_process:
         print(f"Model wrapped with DDP across {world_size} GPUs")
 else:
@@ -362,8 +362,8 @@ base_model = model.module if hasattr(model, 'module') else model
 # Performance optimizations
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True  
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.deterministic = False  # Better performance
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 
 # NCCL TIMEOUT FIXES
 os.environ['NCCL_TIMEOUT'] = '1800'  # 30 minutes instead of 10

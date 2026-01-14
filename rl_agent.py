@@ -8,13 +8,12 @@ _collect_batch_counter = 0
 _reward_calc_counter = 0
 
 
-def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, projection_matrix=None, device='cuda'):
-    env = MaskingEnv(fi1_shape, mask_ratio, patch_size, projection_matrix=projection_matrix, device=device)
+def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=None, device='cuda'):
+    env = MaskingEnv(fi1_shape, mask_ratio, patch_size=patch_size, feature_dim=feature_dim, device=device)
     
     agent = PPO(
         action_dim=env.action_space.n,
-        total_patches=env.total_patches,
-        compressed_feature_dim=env.compressed_feature_dim,
+        feature_dim=feature_dim,
         device=device
     )
     
@@ -43,7 +42,13 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32, image_features=
         while not done:
             available = env.get_available_actions()
             action, log_prob, value = agent.select_action(obs, available, deterministic=False)
-            states.append(obs.copy())
+            
+            states_copy = {
+                'mask': obs['mask'].clone(),
+                'features': obs['features'].clone()
+            }
+
+            states.append(states_copy)
             actions.append(action)
             log_probs.append(log_prob)
             values.append(value)
@@ -52,8 +57,14 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32, image_features=
             global _collect_batch_counter
             if i == 0 and len(actions) == 1:
                 if _collect_batch_counter % 50 == 0:
-                    state_tensor = torch.FloatTensor(obs).to(agent.device)
-                    action_probs, _ = agent.policy.forward(state_tensor)
+
+                    state_dict = {
+                        'mask': obs['mask'].unsqueeze(0).to(agent.device),
+                        'features': obs['features'].unsqueeze(0).to(agent.device)
+                    }
+                    
+                    action_probs, _ = agent.policy.forward(state_dict)
+                    action_probs = action_probs.squeeze(0)
                     max_prob = action_probs.max().item()
                     uniform_prob = 1.0 / action_probs.shape[-1]
                     entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
@@ -78,6 +89,69 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32, image_features=
         })
 
     return episodes
+
+
+def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w, from_radius=2):
+    """
+    Calculate semantic coherence reward for a given action.
+    
+    Args:
+        feature_maps_patches: [n_patches_h, n_patches_w, D] already reshaped feature maps
+        action: Patch ID
+        n_patches_h: Number of patches vertically
+        n_patches_w: Number of patches horizontally
+    """
+    try:
+        ph = action // n_patches_w
+        pw = action % n_patches_w
+        
+        if ph >= n_patches_h or pw >= n_patches_w:
+            return 0.0
+        
+        masked_patch_features = feature_maps_patches[ph, pw]
+
+        # from_radius is the left right, up and down patches from the selected patch        
+        
+        h_start = max(0, ph - from_radius)
+        h_end = min(n_patches_h, ph + from_radius + 1)
+        w_start = max(0, pw - from_radius)
+        w_end = min(n_patches_w, pw + from_radius + 1)
+        
+        neighborhood_features = []
+        for h in range(h_start, h_end):
+            for w in range(w_start, w_end):
+                if h != ph or w != pw:
+                    neighborhood_features.append(feature_maps_patches[h, w])
+        
+        if len(neighborhood_features) == 0:
+            return 0.0
+        
+        avg_neighbor_features = torch.stack(neighborhood_features).mean(dim=0)
+        semantic_score = torch.cosine_similarity(masked_patch_features, avg_neighbor_features, dim=0)
+        
+        return float(semantic_score.item())
+    
+    except Exception as e:
+        print(f"Semantic coherence calculation failed: {e}")
+        return 0.0
+
+
+def get_current_weights(current_stepm=None, total_steps=None, 
+                       pixel_weight_multiplier=1.0,
+                       semantic_weight_multiplier=1.0):
+    
+    # Favor pixel rewards more (they're more discriminative)
+    # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
+    alpha = 0.8 * pixel_weight_multiplier
+    beta = 0.2 * semantic_weight_multiplier
+    
+    total = alpha + beta
+    if total > 0:
+        alpha, beta = alpha/total, beta/total
+    else:
+        alpha, beta = 0.8, 0.2
+    
+    return alpha, beta
 
 
 def calculate_jepa_rewards(episodes, jepa_outputs):
@@ -184,86 +258,31 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
                 _reward_calc_counter += 1
             
             episode_rewards.append(final_reward)
-        
-        all_rewards.append(episode_rewards)
-    
+
+        # Normalize rewards to [0, 1] within this episode
+        if len(episode_rewards) > 0:
+            min_r = min(episode_rewards)
+            max_r = max(episode_rewards)
+
+            if max_r - min_r > 1e-6:
+                normalized = [(r - min_r) / (max_r - min_r) for r in episode_rewards]
+            else:
+                normalized = [0.5] * len(episode_rewards)
+
+            all_rewards.append(normalized)
+
+        else:
+            all_rewards.append([])
+
+
     return all_rewards
-
-
-def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w, from_radius=2):
-    """
-    Calculate semantic coherence reward for a given action.
-    
-    Args:
-        feature_maps_patches: [n_patches_h, n_patches_w, D] already reshaped feature maps
-        action: Patch ID
-        n_patches_h: Number of patches vertically
-        n_patches_w: Number of patches horizontally
-    """
-    try:
-        ph = action // n_patches_w
-        pw = action % n_patches_w
-        
-        if ph >= n_patches_h or pw >= n_patches_w:
-            return 0.0
-        
-        masked_patch_features = feature_maps_patches[ph, pw]
-
-        # from_radius is the left right, up and down patches from the selected patch        
-        
-        h_start = max(0, ph - from_radius)
-        h_end = min(n_patches_h, ph + from_radius + 1)
-        w_start = max(0, pw - from_radius)
-        w_end = min(n_patches_w, pw + from_radius + 1)
-        
-        neighborhood_features = []
-        for h in range(h_start, h_end):
-            for w in range(w_start, w_end):
-                if h != ph or w != pw:
-                    neighborhood_features.append(feature_maps_patches[h, w])
-        
-        if len(neighborhood_features) == 0:
-            return 0.0
-        
-        avg_neighbor_features = torch.stack(neighborhood_features).mean(dim=0)
-        semantic_score = torch.cosine_similarity(masked_patch_features, avg_neighbor_features, dim=0)
-        
-        return float(semantic_score.item())
-    
-    except Exception as e:
-        print(f"Semantic coherence calculation failed: {e}")
-        return 0.0
-
-
-def get_current_weights(current_stepm=None, total_steps=None, 
-                       pixel_weight_multiplier=1.0,
-                       semantic_weight_multiplier=1.0):
-    
-    # Favor pixel rewards more (they're more discriminative)
-    # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
-    alpha = 0.5 * pixel_weight_multiplier
-    beta = 0.5 * semantic_weight_multiplier
-    
-    total = alpha + beta
-    if total > 0:
-        alpha, beta = alpha/total, beta/total
-    else:
-        alpha, beta = 0.5, 0.5
-    
-    return alpha, beta
-
 
 class MaskingAgentTrainer:
 
-    def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=None, compressed_feature_dim=None, device='cuda'):
+    def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=None, device='cuda'):
         
-        if feature_dim is not None and compressed_feature_dim is not None:
-            self.feature_dim = feature_dim
-            self.compressed_feature_dim = compressed_feature_dim
-            self.projection_matrix = (torch.randn(self.feature_dim, self.compressed_feature_dim, requires_grad=False) / np.sqrt(self.feature_dim)).to(device)
-        else:
-            self.projection_matrix = None
-        self.agent, self.env = create_custom_ppo_agent(fi1_shape, mask_ratio, patch_size, projection_matrix=self.projection_matrix, device=device)
+        self.feature_dim = feature_dim
+        self.agent, self.env = create_custom_ppo_agent(fi1_shape, mask_ratio, patch_size, feature_dim=feature_dim, device=device)
         self.fi1_shape = fi1_shape
         self._update_counter = 0  # Counter for reducing print frequency
 

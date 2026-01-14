@@ -9,7 +9,7 @@ from gym import spaces
 
 
 class MaskingEnv(gym.Env):
-    def __init__(self, fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, projection_matrix=None, device='cuda'):
+    def __init__(self, fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int = 8, feature_dim=None, device='cuda'):
         super(MaskingEnv, self).__init__()
 
         B, D, H8, W8 = fi1_shape  # e.g., [B, D, 28, 28]
@@ -21,9 +21,6 @@ class MaskingEnv(gym.Env):
         self.patch_size = patch_size
         self.mask_ratio = mask_ratio
 
-        self.projection_matrix = projection_matrix
-        self.compressed_feature_dim = projection_matrix.shape[1]
-        print(f"here is the shape of the projection matrix: {self.projection_matrix.shape}")
         self.device = device
 
         self.n_patches_h = H8 // patch_size
@@ -32,10 +29,14 @@ class MaskingEnv(gym.Env):
         self.num_masked = int(mask_ratio * self.total_patches)
         
         self.action_space = spaces.Discrete(self.total_patches)
-    
+
+        self.feature_dim = feature_dim
+
         # per patch features
-        state_size = self.total_patches + int(self.total_patches * self.compressed_feature_dim)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_size,), dtype=np.float32)
+        self.observation_space = spaces.Dict({
+            'patch_mask': spaces.Box(low=0.0, high=1.0, shape=(self.total_patches,), dtype=np.float32),
+            'features': spaces.Box(low=-np.inf, high=np.inf, shape=(self.total_patches, self.feature_dim), dtype=np.float32)
+        })
 
         self.current_mask = None
         self.masked_count = 0
@@ -50,27 +51,27 @@ class MaskingEnv(gym.Env):
         self.masked_count = 0
         self.masked_patches = set()
         self.step_count = 0
-         
-        # Features are ALREADY compressed in train.py, just use them
+        
         if image_features is not None:
-            #print(f"[ENV DEBUG] image_features shape: {image_features.shape}")
-            self.compressed_features = image_features  # Already [64, 64], don't compress again!
+            self.features = image_features  # [64, 768]
         else:
-            self.compressed_features = torch.zeros(self.total_patches, self.compressed_feature_dim, device=self.device)
+            self.features = torch.zeros(self.ptotal_patches, self.feature_dim, device=self.device)
         
-        # Build state
-        patch_mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
-        state = torch.cat([patch_mask, self.compressed_features.flatten()])
+        # Initialize mask tensor
+        self.mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
         
-        #print(f"[ENV DEBUG] final state shape: {state.shape}")
+        # Return dict state
+        state = {
+            'mask': self.mask,
+            'features': self.features
+        }
         
-        return state.cpu().numpy()
+        return state
 
 
     def step(self, action):
-
         self.step_count += 1
-    
+
         ph = action // self.n_patches_w
         pw = action % self.n_patches_w
         
@@ -85,30 +86,26 @@ class MaskingEnv(gym.Env):
                 
         self.masked_count += 1
         self.masked_patches.add(action)
+        
+        # Update the mask tensor
+        self.mask[action] = 1.0  # ← Mark this patch as masked
+        
         done = (self.masked_count >= self.num_masked) or (self.step_count >= self.max_steps)
-
+        
         if done and self.masked_count >= self.num_masked:
-
-            actual_pixels = self.current_mask.sum().item()
-            expected = self.masked_count * self.patch_size * self.patch_size
-                
             steps_saved = self.max_steps - self.step_count
             efficiency_bonus = (steps_saved / self.max_steps) * 10.0
             reward = efficiency_bonus
         else:
             reward = 0.0
-
-        # Convert masked_patches set to tensor
-        patch_mask = torch.zeros(self.total_patches, dtype=torch.float32, device=self.device)
-        if len(self.masked_patches) > 0:
-            indices = torch.tensor(list(self.masked_patches), device=self.device)
-            patch_mask[indices] = 1.0
         
-        state = torch.cat([patch_mask, self.compressed_features.flatten()])
-
-        self.state = state.cpu().numpy()
-    
-        return self.state, reward, done, {}
+        # Return dict state instead of flat
+        state = {
+            'mask': self.mask,           # [64]
+            'features': self.features    # [64, 768]
+        }
+        
+        return state, reward, done, {}
 
     def get_final_mask(self):
         return self.current_mask
