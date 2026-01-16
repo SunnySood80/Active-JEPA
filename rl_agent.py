@@ -138,12 +138,10 @@ def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_pa
 
 def get_current_weights(current_stepm=None, total_steps=None, 
                        pixel_weight_multiplier=1.0,
-                       semantic_weight_multiplier=1.0):
+                       denoise_weight_multiplier=1.0):
     
-    # Favor pixel rewards more (they're more discriminative)
-    # Pixel: 0.7, Semantic: 0.3 (was 0.5/0.5)
     alpha = 0.8 * pixel_weight_multiplier
-    beta = 0.2 * semantic_weight_multiplier
+    beta = 0.2 * denoise_weight_multiplier
     
     total = alpha + beta
     if total > 0:
@@ -152,7 +150,6 @@ def get_current_weights(current_stepm=None, total_steps=None,
         alpha, beta = 0.8, 0.2
     
     return alpha, beta
-
 
 def calculate_jepa_rewards(episodes, jepa_outputs):
     """
@@ -174,7 +171,8 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
         pixel_errors = jepa_outputs['pixel_errors'][i]  # [N] reconstruction errors per pixel (numpy)
         feature_maps_cpu = jepa_outputs['features'][i]   # [D, H8, W8] already on CPU
         mask_indices = jepa_outputs['mask_indices'][i]  # [M] already on CPU
-        
+        denoise_error_map = jepa_outputs['denoised_error'][i]
+
         # Get valid mask indices (filter out padding -1s) - already on CPU
         valid_indices = mask_indices[mask_indices >= 0].numpy()
         
@@ -190,7 +188,11 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
         D, H8, W8 = feature_maps_cpu.shape
         n_patches_h = H8 // patch_size  # Number of patches vertically
         n_patches_w = W8 // patch_size  # Number of patches horizontally
-        
+
+        H4, W4 = denoise_error_map.shape
+        denoise_patch_h = H4 // patch_size
+        denoise_patch_w = W4 // patch_size
+
         # CRITICAL OPTIMIZATION: Reshape feature_maps ONCE per episode, not per action
         # Reshape from [D, H8, W8] to [n_patches_h, n_patches_w, D] by averaging over patch pixels
         feature_maps_reshaped = feature_maps_cpu.view(D, n_patches_h, patch_size, n_patches_w, patch_size)
@@ -215,7 +217,17 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             h_end = min(h_start + patch_size, H8)
             w_start = pw * patch_size
             w_end = min(w_start + patch_size, W8)
-            
+
+            # DENOISE REWARD (new, inline)
+            dh_start = ph * denoise_patch_h
+            dh_end = min((ph + 1) * denoise_patch_h, H4)
+            dw_start = pw * denoise_patch_w  
+            dw_end = min((pw + 1) * denoise_patch_w, W4) 
+
+            denoised_patch_errors = float(denoise_error_map[dh_start:dh_end, dw_start:dw_end].mean())
+
+            denoise_reward = 1.0 / (1.0 + denoised_patch_errors)
+
             # Collect errors for all pixels in this patch
             patch_errors = []
             for h in range(h_start, h_end):
@@ -244,16 +256,10 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             # Combined reward
             alpha, beta = get_current_weights()
             
-            # Only compute semantic if weight is non-zero
-            if beta > 0:
-                semantic_reward = calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_patches_w)
-            else:
-                semantic_reward = 0.0
-            
-            final_reward = alpha * pixel_reward + beta * semantic_reward
+            final_reward = alpha * pixel_reward + beta * denoise_reward
             global _reward_calc_counter
             if i == 0 and j < 1 and _reward_calc_counter % 50 == 0:
-                print(f"[RL] α={alpha:.2f} β={beta:.2f} | Pixel {pixel_reward:.4f} Semantic {semantic_reward:.4f} → Final {final_reward:.4f}")
+                print(f"[RL] α={alpha:.2f} β={beta:.2f} | Pixel {pixel_reward:.4f} Denoise {denoise_reward:.4f} → Final {final_reward:.4f}")
             if i == 0 and j < 1:
                 _reward_calc_counter += 1
             

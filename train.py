@@ -177,6 +177,8 @@ def enable_gradient_checkpointing(model):
 
 if is_main_process:
     print("Creating model...")
+
+patch_size = 8
 model = MaskJEPA2D(
     in_chans=3,
     tau=0.996,
@@ -184,7 +186,7 @@ model = MaskJEPA2D(
     num_queries=32,
     num_cross_attn=9,
     num_self_attn=2,
-    patch_size=8
+    patch_size=patch_size
 ).to(device)
 
 D = model.embed_dim
@@ -212,10 +214,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./quick_test/jepa_rl_training_output_1337_quick_12"   
+    save_dir = "./quick_test/jepa_rl_training_output_1337"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./quick_test/jepa_training_output_1337_quick_12"
+    save_dir = "./quick_test/jepa_training_output_1337"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)
@@ -361,8 +363,10 @@ for epoch in range(num_epochs):
                 mode='bilinear', 
                 align_corners=False
             )
-            denoise_loss = F.mse_loss(outputs['denoised_prediction'], x4)
-            
+            denoise_loss_map = F.mse_loss(outputs['denoised_prediction'], x4, reduction='none').mean(dim=1) # [B, 3, H4, W4]  
+
+            denoise_loss = F.mse_loss(outputs['denoised_prediction'], x4) # scalar
+
             if batch_idx == 0 and is_main_process:
                 td = F.interpolate(images, size=outputs['denoised_prediction'].shape[-2:],
                                    mode='bilinear', align_corners=False)
@@ -394,11 +398,13 @@ for epoch in range(num_epochs):
             # CRITICAL OPTIMIZATION: Transfer entire batch to CPU ONCE, not per episode
             features_batch = outputs['fi1_features'].detach().cpu().float()  # [B, D, H8, W8]
             mask_indices_batch = outputs['mask_indices'].detach().cpu()  # [B, M]
+            denoised_error_batch  = denoise_loss_map.detach().cpu()  # [B, 3, H4, W4]
             
             jepa_outputs_for_rl = {
                 'pixel_errors': pixel_errors_batch,
                 'features': features_batch,  # Already on CPU
-                'mask_indices': mask_indices_batch  # Already on CPU
+                'mask_indices': mask_indices_batch,  # Already on CPU
+                'denoised_error': denoised_error_batch  # Already on CPU
             }
             
             real_rewards = calculate_jepa_rewards(episodes, jepa_outputs_for_rl)
