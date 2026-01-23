@@ -118,7 +118,7 @@ jepa_dataset = JEPADataset()
 
 if QUICK_TEST:
     full_size = len(jepa_dataset)
-    quarter_size = full_size // 12
+    quarter_size = full_size // 4
     jepa_dataset = Subset(jepa_dataset, range(quarter_size))
     if is_main_process:
         print(f"QUICK TEST MODE: Using quarter dataset ({len(jepa_dataset):,} / {full_size:,} samples)")
@@ -214,10 +214,10 @@ optimizer = AdamW(model.parameters(), lr=base_lr, weight_decay=weight_decay)
 scheduler = LambdaLR(optimizer, lr_lambda=lambda epoch: lr_lambda(epoch, num_epochs, warmup_epochs))
 
 if USE_RL_MASKING:
-    save_dir = "./quick_test/jepa_rl_training_output_1337"   
+    save_dir = "./quick_test/jepa_rl_training_output_100_-denoise_.1"   
     model_filename = "mask_jepa_rl_pretrained_weights.pt"
 else:
-    save_dir = "./quick_test/jepa_training_output_1337"
+    save_dir = "./quick_test/jepa_training_output_100_2"
     model_filename = "mask_jepa_pretrained_weights.pt"
 
 os.makedirs(save_dir, exist_ok=True)

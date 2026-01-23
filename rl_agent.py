@@ -6,6 +6,7 @@ from rl_environment import MaskingEnv
 # Module-level counters for print frequency control
 _collect_batch_counter = 0
 _reward_calc_counter = 0
+_curriculum_counter = 0
 
 
 def create_custom_ppo_agent(fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=None, device='cuda'):
@@ -69,7 +70,7 @@ def collect_episodes_batch(agent, env, fi1_shape, batch_size=32, image_features=
                     uniform_prob = 1.0 / action_probs.shape[-1]
                     entropy = -torch.sum(action_probs * torch.log(action_probs + 1e-8)).item()
                     is_uniform = abs(max_prob - uniform_prob) < 0.05 * uniform_prob
-                    print(f"[RL POLICY] max_prob={max_prob:.4f} (uniform={uniform_prob:.4f}), entropy={entropy:.4f}, still_uniform={is_uniform}")
+                    #print(f"[RL POLICY] max_prob={max_prob:.4f} (uniform={uniform_prob:.4f}), entropy={entropy:.4f}, still_uniform={is_uniform}")
                 _collect_batch_counter += 1
             
             obs, reward, done, info = env.step(action)
@@ -140,14 +141,14 @@ def get_current_weights(current_stepm=None, total_steps=None,
                        pixel_weight_multiplier=1.0,
                        denoise_weight_multiplier=1.0):
     
-    alpha = 0.8 * pixel_weight_multiplier
-    beta = 0.2 * denoise_weight_multiplier
+    alpha = 0.5 * pixel_weight_multiplier
+    beta = 0.5 * denoise_weight_multiplier
     
     total = alpha + beta
     if total > 0:
         alpha, beta = alpha/total, beta/total
     else:
-        alpha, beta = 0.8, 0.2
+        alpha, beta = 0.5, 0.5
     
     return alpha, beta
 
@@ -163,9 +164,16 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
         all_rewards: List of reward lists, one per episode
     """
     all_rewards = []
+    all_pixel_rewards = []
+    all_denoise_rewards = []
+    all_final_rewards = []
+
     
     for i, episode in enumerate(episodes):
         episode_rewards = []
+        episode_pixel_rewards = []
+        episode_denoise_rewards = []
+        episode_final = []
         
         # Get JEPA outputs for this episode (already on CPU from train.py batch transfer)
         pixel_errors = jepa_outputs['pixel_errors'][i]  # [N] reconstruction errors per pixel (numpy)
@@ -182,7 +190,6 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             if idx < len(pixel_errors):
                 pixel_pos_to_error[int(pixel_pos)] = float(pixel_errors[idx])
         
-        # ✅ GET GRID DIMENSIONS FROM FEATURE_MAPS
         # feature_maps shape is [D, H8, W8] where H8, W8 are pixel dimensions at stride 8
         patch_size = 8  # From your environment
         D, H8, W8 = feature_maps_cpu.shape
@@ -208,8 +215,7 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             # Check if action is valid
             if ph >= n_patches_h or pw >= n_patches_w:
                 print(f"[ERROR] Invalid action {action}: patch ({ph},{pw}) out of bounds!")
-                final_reward = 0.0
-                episode_rewards.append(final_reward)
+                episode_rewards.append(0.0)
                 continue
             
             # Get pixel range for this patch
@@ -222,11 +228,11 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             dh_start = ph * denoise_patch_h
             dh_end = min((ph + 1) * denoise_patch_h, H4)
             dw_start = pw * denoise_patch_w  
-            dw_end = min((pw + 1) * denoise_patch_w, W4) 
+            dw_end = min((pw + 1) * denoise_patch_w, W4)
+            
 
             denoised_patch_errors = float(denoise_error_map[dh_start:dh_end, dw_start:dw_end].mean())
-
-            denoise_reward = 1.0 / (1.0 + denoised_patch_errors)
+            denoise_reward = denoised_patch_errors
 
             # Collect errors for all pixels in this patch
             patch_errors = []
@@ -245,43 +251,35 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
                     print(f"[WARNING] Action {action} (patch {ph},{pw}) has no matching pixel errors!")
                 pixel_reward = 0.0
             
-            # DEBUG first 3 actions of first episode
-            # if i == 0 and j < 3:
-            #     print(f"  Action[{j}]={action} (patch {ph},{pw}):")
-            #     print(f"    Pixels: [{h_start}:{h_end}, {w_start}:{w_end}]")
-            #     print(f"    Pixel positions: {h_start*W8+w_start} to {(h_end-1)*W8+(w_end-1)}")
-            #     print(f"    Errors found: {len(patch_errors)}/{(h_end-h_start)*(w_end-w_start)} pixels")
-            #     print(f"    Mean error: {pixel_reward:.4f}")
-            
             # Combined reward
             alpha, beta = get_current_weights()
             
-            final_reward = alpha * pixel_reward + beta * denoise_reward
-            global _reward_calc_counter
-            if i == 0 and j < 1 and _reward_calc_counter % 50 == 0:
-                print(f"[RL] α={alpha:.2f} β={beta:.2f} | Pixel {pixel_reward:.4f} Denoise {denoise_reward:.4f} → Final {final_reward:.4f}")
-            if i == 0 and j < 1:
-                _reward_calc_counter += 1
-            
-            episode_rewards.append(final_reward)
-
-        # Normalize rewards to [0, 1] within this episode
-        if len(episode_rewards) > 0:
-            min_r = min(episode_rewards)
-            max_r = max(episode_rewards)
-
-            if max_r - min_r > 1e-6:
-                normalized = [(r - min_r) / (max_r - min_r) for r in episode_rewards]
-            else:
-                normalized = [0.5] * len(episode_rewards)
-
-            all_rewards.append(normalized)
-
-        else:
-            all_rewards.append([])
+            # Store for analysis
+            episode_pixel_rewards.append(pixel_reward)
+            episode_denoise_rewards.append(denoise_reward)
 
 
-    return all_rewards
+        np_pixel = np.array(episode_pixel_rewards)
+        np_denoise = np.array(episode_denoise_rewards)
+        
+        pixel_norm = (np_pixel - np_pixel.min()) / (np_pixel.max() - np_pixel.min() + 1e-8) if np_pixel.max() > np_pixel.min() else np_pixel
+        denoise_norm = (np_denoise - np_denoise.min()) / (np_denoise.max() - np_denoise.min() + 1e-8) if np_denoise.max() > np_denoise.min() else np_denoise
+
+        # episode_rewards = list(alpha * pixel_norm + beta * (1 - denoise_norm))
+        episode_rewards = list(1 - denoise_norm) 
+        all_rewards.append(episode_rewards)
+        
+        all_pixel_rewards.append(pixel_norm.tolist())
+        all_denoise_rewards.append(denoise_norm.tolist())
+        all_final_rewards.append(all_rewards)
+
+
+    # Return rewards + component breakdown
+    return all_rewards, {
+        'pixel_rewards': all_pixel_rewards,
+        'denoise_rewards': all_denoise_rewards,
+        'final_rewards': all_final_rewards,
+    }
 
 class MaskingAgentTrainer:
 
@@ -302,7 +300,8 @@ class MaskingAgentTrainer:
         return masks, episodes
     
     def update_agent(self, episodes, jepa_outputs):
-        jepa_rewards = calculate_jepa_rewards(episodes, jepa_outputs)
+        # Get rewards and component breakdown
+        jepa_rewards, reward_components = calculate_jepa_rewards(episodes, jepa_outputs)
         
         all_states = []
         all_actions = []
@@ -311,25 +310,20 @@ class MaskingAgentTrainer:
         all_rewards = []
         all_dones = []
         
-        # Debug: Check reward variance
+        # Collect all rewards (normalized)
         all_rewards_flat = []
+        all_pixel_flat = []
+        all_denoise_flat = []
+        all_final_flat = []
+        
         for i, episode in enumerate(episodes):
             episode_rewards = jepa_rewards[i]
             all_rewards_flat.extend(episode_rewards)
-        
-        # Only print reward stats every 20 updates to reduce spam
-        if len(all_rewards_flat) > 0:
-            reward_mean = np.mean(all_rewards_flat)
-            reward_std = np.std(all_rewards_flat)
-            reward_min = np.min(all_rewards_flat)
-            reward_max = np.max(all_rewards_flat)
-            if len(episodes) > 0 and len(episodes[0]['actions']) > 0:
-                if self._update_counter % 20 == 0:
-                    print(f"[RL DEBUG] Reward stats: mean={reward_mean:.4f}, std={reward_std:.4f}, min={reward_min:.4f}, max={reward_max:.4f}")
-                self._update_counter += 1
-        
-        for i, episode in enumerate(episodes):
-            episode_rewards = jepa_rewards[i]
+            
+            # Component rewards
+            all_pixel_flat.extend(reward_components['pixel_rewards'][i])
+            all_denoise_flat.extend(reward_components['denoise_rewards'][i])
+            all_final_flat.extend(reward_components['final_rewards'][i])
             
             all_states.extend(episode['states'])
             all_actions.extend(episode['actions'])
@@ -338,16 +332,72 @@ class MaskingAgentTrainer:
             all_rewards.extend(episode_rewards)
             all_dones.extend(episode['dones'])
         
+        # Compute GAE
         advantages, returns = self.agent.compute_gae(
             rewards=all_rewards,
             values=all_values,
             dones=all_dones
         )
         
-        self.agent.train_on_batch(
+        # Train PPO and get metrics
+        ppo_metrics = self.agent.train_on_batch(
             states=all_states,
             actions=all_actions,
             old_log_probs=all_old_log_probs,
             advantages=advantages,
             returns=returns
         )
+        
+        if ppo_metrics is None:
+            print("[RL ERROR] train_on_batch returned None! Missing return statement!")
+            return
+        
+        # ========== PRINT COMPREHENSIVE METRICS EVERY 20 BATCHES ==========
+        if self._update_counter % 80 == 0:
+            alpha, beta = get_current_weights()
+            
+            print(f"\n{'='*80}")
+            print(f"[RL METRICS] Update {self._update_counter}")
+            print(f"{'='*80}")
+            
+            # REWARD COMPONENTS
+            print(f"\n💰 REWARD COMPONENTS (α={alpha:.2f} β={beta:.2f}):")
+            print(f"  Pixel:    mean={np.mean(all_pixel_flat):.4f} std={np.std(all_pixel_flat):.4f} "
+                f"range=[{np.min(all_pixel_flat):.4f}, {np.max(all_pixel_flat):.4f}]")
+            print(f"  Denoise:  mean={np.mean(all_denoise_flat):.4f} std={np.std(all_denoise_flat):.4f} "
+                f"range=[{np.min(all_denoise_flat):.4f}, {np.max(all_denoise_flat):.4f}]")
+            print(f"  Combined: mean={np.mean(all_final_flat):.4f} std={np.std(all_final_flat):.4f} "
+                f"range=[{np.min(all_final_flat):.4f}, {np.max(all_final_flat):.4f}]")
+            print(f"  Final (norm):   mean={np.mean(all_rewards_flat):.4f} std={np.std(all_rewards_flat):.4f} "
+                f"range=[{np.min(all_rewards_flat):.4f}, {np.max(all_rewards_flat):.4f}]")
+            
+            # Per-episode stats
+            episode_totals = [sum(jepa_rewards[i]) for i in range(len(episodes))]
+            print(f"  Episode totals: mean={np.mean(episode_totals):.4f} std={np.std(episode_totals):.4f} "
+                f"range=[{np.min(episode_totals):.4f}, {np.max(episode_totals):.4f}]")
+            
+            # PPO TRAINING METRICS
+            print(f"\n🎯 PPO TRAINING:")
+            print(f"  Losses:")
+            print(f"    Policy:  {ppo_metrics['policy_loss']:.4f}")
+            print(f"    Value:   {ppo_metrics['value_loss']:.4f}")
+            print(f"    Entropy: {ppo_metrics['entropy']:.4f}")
+            print(f"    Total:   {ppo_metrics['total_loss']:.4f}")
+            print(f"  Stability:")
+            print(f"    KL div:     {ppo_metrics['kl_divergence']:.6f}")
+            print(f"    Approx KL:  {ppo_metrics['approx_kl']:.6f}")
+            print(f"    Clip frac:  {ppo_metrics['clip_fraction']:.3f}")
+            print(f"  Value function:")
+            print(f"    Explained var: {ppo_metrics['explained_variance']:.3f}")
+            print(f"  Gradients:")
+            print(f"    Policy: {ppo_metrics['grad_norm_policy']:.4f}")
+            print(f"    Value:  {ppo_metrics['grad_norm_value']:.4f}")
+            print(f"  Advantage/Returns:")
+            print(f"    Advantages: {ppo_metrics['advantage_mean']:.4f}±{ppo_metrics['advantage_std']:.4f}")
+            print(f"    Returns:    {ppo_metrics['return_mean']:.4f}±{ppo_metrics['return_std']:.4f}")
+            
+            print(f"{'='*80}\n")
+        
+        self._update_counter += 1
+
+

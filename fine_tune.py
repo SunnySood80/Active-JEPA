@@ -125,8 +125,8 @@ ade_val_dataset = ADE20KDataset(split="validation")
 if QUICK_TEST:  
     train_full_size = len(ade_train_dataset)
     val_full_size = len(ade_val_dataset)
-    train_quarter_size = train_full_size // 12
-    val_quarter_size = val_full_size // 12
+    train_quarter_size = train_full_size // 4
+    val_quarter_size = val_full_size // 4
     ade_train_dataset = Subset(ade_train_dataset, range(train_quarter_size))
     ade_val_dataset = Subset(ade_val_dataset, range(val_quarter_size))
     if is_main_process:
@@ -298,7 +298,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "./quick_test/jepa_rl_training_output_1337_quick_12/mask_jepa_rl_pretrained_weights.pt"
+weights_path = "./quick_test/jepa_rl_training_output_100_latent_-denoise/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     if is_main_process:
         print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
@@ -310,7 +310,7 @@ ckpt = torch.load(weights_path, map_location=device)
 jepa_model.context_encoder.load_state_dict(ckpt['backbone_state_dict'])
 jepa_model.pixel_decoder.load_state_dict(ckpt['pixel_decoder_state_dict'])
 if 'transformer_decoder_cross_blocks_state_dict' in ckpt:
-    # Load cross-attention blocks if available
+    # Load cross-attention blocks if availablef
     pass  # These are for predictor, not needed for fine-tuning
 if is_main_process:
     print("Loaded: context_encoder, pixel_decoder from pretrained weights")
@@ -374,7 +374,7 @@ scheduler = LambdaLR(
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "./quick_test/jepa_rl_finetuning_output_1337_quick_12/"
+save_dir = "./quick_test/jepa_rl_finetuning_output_100_latent_-denoise/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:

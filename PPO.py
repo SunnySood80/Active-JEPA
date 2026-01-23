@@ -68,12 +68,16 @@ class SmartPolicyNetwork(nn.Module):
         self.feature_dim = feature_dim
         self.action_dim = action_dim
         
-        # Score each patch independently
-        self.scorer = nn.Linear(feature_dim, 1)
+        # Score each patch using BOTH features AND mask state
+        self.scorer = nn.Sequential(
+            nn.Linear(feature_dim + 1, 256),  # +1 for mask input
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
         
-        # Value head (needs to see all features)
+        # Value head (needs to see all features + mask state)
         self.value_head = nn.Sequential(
-            nn.Linear(feature_dim * action_dim, 512),
+            nn.Linear((feature_dim + 1) * action_dim, 512),
             nn.ReLU(),
             nn.Linear(512, 1)
         )
@@ -81,13 +85,22 @@ class SmartPolicyNetwork(nn.Module):
     def forward(self, state_dict):
         # state_dict: {'mask': [B, 64], 'features': [B, 64, 768]}
         features = state_dict['features']  # [B, 64, 768]
+        mask = state_dict['mask']  # [B, 64]
         
-        # Score each patch
-        action_logits = self.scorer(features).squeeze(-1)  # [B, 64]
+        # Concatenate mask as extra feature per patch
+        mask_expanded = mask.unsqueeze(-1)  # [B, 64, 1]
+        features_with_mask = torch.cat([features, mask_expanded], dim=-1)  # [B, 64, 769]
+        
+        # Score each patch (now considering mask state)
+        action_logits = self.scorer(features_with_mask).squeeze(-1)  # [B, 64]
+        
+        # CRITICAL: Mask out already-selected patches (set logits to -inf)
+        action_logits = action_logits.masked_fill(mask.bool(), float('-inf'))
+        
         action_probs = F.softmax(action_logits, dim=-1)
         
-        # Value estimate
-        flat_features = features.reshape(features.shape[0], -1)  # [B, 64*768]
+        # Value estimate (also uses mask info)
+        flat_features = features_with_mask.reshape(features.shape[0], -1)  # [B, 64*769]
         value = self.value_head(flat_features)  # [B, 1]
         
         return action_probs, value
@@ -102,12 +115,12 @@ class PPO:
         self,
         action_dim = 64,
         feature_dim = 768,
-        lr: float = 3e-4, # was 3e-4
+        lr: float = 1e-4, # was 3e-4
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.3,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.001,
+        entropy_coef: float = 0.1, # was 0.01
         max_grad_norm: float = 0.5,
         n_epochs: int = 4,
         batch_size: int = 64,
@@ -164,11 +177,6 @@ class PPO:
         
         # Clamp to prevent extreme values
         action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)
-        
-        # Mask unavailable actions
-        for i in range(len(action_probs)):
-            if i not in available_actions:
-                action_probs[i] = 0
         
         # Normalize
         action_probs = action_probs / (action_probs.sum() + 1e-10)
@@ -239,7 +247,20 @@ class PPO:
             return
         
         advantages_tensor = (advantages_tensor - advantages_tensor.mean()) / (advantages_tensor.std() + 1e-8)
-        
+
+        # Metrics tracking
+        metrics = {
+            'policy_loss': 0.0,
+            'value_loss': 0.0,
+            'entropy': 0.0,
+            'total_loss': 0.0,
+            'kl_divergence': 0.0,
+            'clip_fraction': 0.0,
+            'approx_kl': 0.0,
+            'grad_norm_policy': 0.0,
+            'grad_norm_value': 0.0,
+        }
+            
         dataset_size = len(states)
         for epoch in range(self.n_epochs):
             indices = torch.randperm(dataset_size, generator=self.cpu_generator)
@@ -259,7 +280,7 @@ class PPO:
                 
                 action_probs, values = self.policy(batch_states)
                 
-                # ADD: Clamp action_probs to prevent NaN
+                # Clamp action_probs to prevent NaN
                 action_probs = torch.clamp(action_probs, min=1e-8, max=1.0)
                 action_probs = action_probs / action_probs.sum(dim=-1, keepdim=True)
                 
@@ -268,8 +289,6 @@ class PPO:
                 entropy = dist.entropy().mean()
                 
                 ratio = torch.exp(log_probs - batch_old_log_probs)
-                
-                # ADD: Clamp ratio to prevent extreme values
                 ratio = torch.clamp(ratio, 0.01, 100.0)
                 
                 surr1 = ratio * batch_advantages
@@ -283,15 +302,25 @@ class PPO:
                 
                 loss = policy_loss + self.value_coef * value_loss - self.entropy_coef * entropy
                 
-                # ADD: Check for NaN in loss
+                # Check for NaN in loss
                 if torch.isnan(loss).any():
-                    print(f"WARNING: NaN detected in loss! policy_loss={policy_loss.item():.4f}, value_loss={value_loss.item():.4f}, entropy={entropy.item():.4f}")
-                    continue  # Skip this update
+                    print(f"WARNING: NaN detected in loss!")
+                    continue
                 
+                # ========== INSERT THESE CALCULATIONS HERE ==========
+                # Calculate KL metrics BEFORE accumulating
+                with torch.no_grad():
+                    log_ratio = log_probs - batch_old_log_probs
+                    kl_divergence = log_ratio.mean()
+                    approx_kl = ((ratio - 1) - log_ratio).mean()
+                    clip_fraction = ((ratio - 1.0).abs() > self.clip_epsilon).float().mean()
+                # ====================================================
+                
+                # Backward pass
                 self.optimizer.zero_grad()
                 loss.backward()
                 
-                # ADD: Check for NaN in gradients
+                # Check for NaN in gradients
                 has_nan_grad = False
                 for name, param in self.policy.named_parameters():
                     if param.grad is not None and torch.isnan(param.grad).any():
@@ -301,10 +330,63 @@ class PPO:
                 
                 if has_nan_grad:
                     self.optimizer.zero_grad()
-                    continue  # Skip this update
+                    continue
                 
-                total_grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                # ========== INSERT GRADIENT NORM CALCULATIONS HERE ==========
+                # Calculate grad norms AFTER backward, BEFORE optimizer.step()
+                policy_params = [p for n, p in self.policy.named_parameters() if 'scorer' in n or 'policy' in n.lower()]
+                value_params = [p for n, p in self.policy.named_parameters() if 'value' in n.lower()]
+                
+                if policy_params:
+                    grad_norm_policy = torch.nn.utils.clip_grad_norm_(policy_params, self.max_grad_norm)
+                else:
+                    grad_norm_policy = torch.tensor(0.0)
+                
+                if value_params:
+                    grad_norm_value = torch.nn.utils.clip_grad_norm_(value_params, self.max_grad_norm)
+                else:
+                    grad_norm_value = torch.tensor(0.0)
+                
+                # Also clip all params together
+                total_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                # ================================================================
+                
                 self.optimizer.step()
+                
+                # NOW accumulate metrics (all variables exist now!)
+                metrics['policy_loss'] += policy_loss.item()
+                metrics['value_loss'] += value_loss.item()
+                metrics['entropy'] += entropy.item()
+                metrics['total_loss'] += loss.item()
+                metrics['kl_divergence'] += kl_divergence.item()
+                metrics['approx_kl'] += approx_kl.item()
+                metrics['clip_fraction'] += clip_fraction.item()
+                metrics['grad_norm_policy'] += grad_norm_policy.item() if isinstance(grad_norm_policy, torch.Tensor) else grad_norm_policy
+                metrics['grad_norm_value'] += grad_norm_value.item() if isinstance(grad_norm_value, torch.Tensor) else grad_norm_value
+       
+        # Average metrics over all updates
+        num_updates = (dataset_size // self.batch_size) * self.n_epochs
+        
+        for key in metrics:
+            metrics[key] /= max(1, num_updates)
+        
+        # Add additional stats
+        metrics['advantage_mean'] = advantages_tensor.mean().item()
+        metrics['advantage_std'] = advantages_tensor.std().item()
+        metrics['return_mean'] = returns_tensor.mean().item()
+        metrics['return_std'] = returns_tensor.std().item()
+        
+        # Explained variance (using final batch values)
+        values_final = values_flat.detach().cpu().numpy()
+        returns_final = batch_returns.cpu().numpy()
+        var_y = np.var(returns_final)
+        if var_y > 1e-8:
+            explained_var = 1 - np.var(returns_final - values_final) / var_y
+        else:
+            explained_var = 0.0
+        metrics['explained_variance'] = explained_var
+        
+        return metrics
     
     def save(self, path: str):
         torch.save({
