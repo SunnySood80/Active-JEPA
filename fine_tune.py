@@ -298,7 +298,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "./quick_test/jepa_rl_training_output_100_latent_-denoise/mask_jepa_rl_pretrained_weights.pt"
+weights_path = "./quick_test/jepa_rl_training_output_7_latent_scatter_.5.5_.15_2/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     if is_main_process:
         print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
@@ -374,7 +374,7 @@ scheduler = LambdaLR(
 criterion = nn.CrossEntropyLoss(ignore_index=IGNORE_INDEX)
 scaler = GradScaler('cuda')
 
-save_dir = "./quick_test/jepa_rl_finetuning_output_100_latent_-denoise/"
+save_dir = "./quick_test/jepa_rl_finetuning_output_7_.5.5_.15_2/"
 # Ensure directory exists on all ranks
 os.makedirs(save_dir, exist_ok=True)
 if is_main_process:

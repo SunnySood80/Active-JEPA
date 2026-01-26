@@ -74,7 +74,7 @@ jepa_model = MaskJEPA2D(
     num_queries=50, num_cross_attn=5, num_self_attn=1, patch_size=8
 ).to(device)
 
-weights_path = "./quick_test/jepa_training_output_100/mask_jepa_pretrained_weights.pt"
+weights_path = "./quick_test/jepa_rl_training_output_100_latent_denoise_scatter_.4.4.2/mask_jepa_rl_pretrained_weights.pt"
 if not os.path.exists(weights_path):
     print(f"ERROR: Pretrained JEPA weights not found at {weights_path}")
     print("Please run train.py first to pretrain the JEPA model!")
@@ -138,5 +138,5 @@ axes[0].set_title("Original Image")
 axes[1].imshow(cluster_map, cmap='viridis')
 axes[1].set_title("Cluster Assignments")
 plt.colorbar(axes[1].images[0], ax=axes[1])
-plt.savefig('cluster_map_3.png')
+plt.savefig('cluster_map_3_rl.png')
 print("Saved cluster_map.png")

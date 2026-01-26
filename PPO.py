@@ -118,11 +118,11 @@ class PPO:
         lr: float = 1e-4, # was 3e-4
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
-        clip_epsilon: float = 0.3,
+        clip_epsilon: float = 0.2,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.1, # was 0.01
+        entropy_coef: float = 0.15, # was 0.01
         max_grad_norm: float = 0.5,
-        n_epochs: int = 4,
+        n_epochs: int = 5,
         batch_size: int = 64,
         device: str = 'cuda'
     ):

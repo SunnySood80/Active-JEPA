@@ -118,6 +118,93 @@ def generate_fi1_mask(fi1_shape: tuple, mask_ratio: float = 0.5, patch_size: int
     _MASK_GENERATION_COUNTER += 1  # Increment for next call
     return fi1_mask  # [B, H8*W8]
 
+def generate_heuristic_mask(fi1_features: torch.Tensor, mask_ratio: float = 0.5, 
+                           patch_size: int = 8, min_spacing: int = 2):
+    """
+    Heuristic masking: High-variance patches with forced spatial scattering.
+    
+    Strategy:
+    1. Compute per-patch "difficulty" (feature variance)
+    2. Apply checkerboard constraint (min spacing between masked patches)
+    3. Select top-k difficult patches that satisfy spacing
+    
+    Args:
+        fi1_features: [B, D, H8, W8] features from encoder
+        mask_ratio: fraction of patches to mask
+        patch_size: size of each patch (8)
+        min_spacing: minimum distance between masked patches (2 = checkerboard)
+    """
+    B, D, H8, W8 = fi1_features.shape
+    device = fi1_features.device
+    
+    # Calculate patch grid
+    n_patches_h = H8 // patch_size
+    n_patches_w = W8 // patch_size
+    total_patches = n_patches_h * n_patches_w
+    num_masked = int(mask_ratio * total_patches)
+    
+    # Initialize output mask
+    fi1_mask = torch.zeros(B, H8 * W8, dtype=torch.bool, device=device)
+    
+    for b in range(B):
+        # Step 1: Compute per-patch difficulty scores
+        patch_scores = []
+        for ph in range(n_patches_h):
+            for pw in range(n_patches_w):
+                h_start = ph * patch_size
+                h_end = min(h_start + patch_size, H8)
+                w_start = pw * patch_size
+                w_end = min(w_start + patch_size, W8)
+                
+                # Extract patch features
+                patch_feats = fi1_features[b, :, h_start:h_end, w_start:w_end]  # [D, ps, ps]
+                
+                # Compute difficulty: variance + magnitude
+                variance = patch_feats.var()
+                magnitude = patch_feats.abs().mean()
+                difficulty = variance + 0.1 * magnitude  # weighted combination
+                
+                patch_id = ph * n_patches_w + pw
+                patch_scores.append((difficulty.item(), patch_id, ph, pw))
+        
+        # Step 2: Sort by difficulty (descending)
+        patch_scores.sort(reverse=True, key=lambda x: x[0])
+        
+        # Step 3: Greedy selection with spacing constraint
+        masked_patches = []
+        masked_coords = set()
+        
+        for difficulty, patch_id, ph, pw in patch_scores:
+            if len(masked_patches) >= num_masked:
+                break
+            
+            # Check spacing constraint
+            satisfies_spacing = True
+            for mph, mpw in masked_coords:
+                distance = max(abs(ph - mph), abs(pw - mpw))  # Chebyshev distance
+                if distance < min_spacing:
+                    satisfies_spacing = False
+                    break
+            
+            if satisfies_spacing:
+                masked_patches.append(patch_id)
+                masked_coords.add((ph, pw))
+        
+        # Step 4: Apply mask
+        for patch_id in masked_patches:
+            ph = patch_id // n_patches_w
+            pw = patch_id % n_patches_w
+            
+            h_start = ph * patch_size
+            h_end = min(h_start + patch_size, H8)
+            w_start = pw * patch_size
+            w_end = min(w_start + patch_size, W8)
+            
+            for h in range(h_start, h_end):
+                for w in range(w_start, w_end):
+                    fi1_mask[b, h * W8 + w] = True
+    
+    return fi1_mask  # [B, H8*W8]
 
 
 def compute_patch_grid(image_shape, patch_size):
