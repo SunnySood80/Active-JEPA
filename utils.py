@@ -206,6 +206,12 @@ def generate_heuristic_mask(fi1_features: torch.Tensor, mask_ratio: float = 0.5,
     
     return fi1_mask  # [B, H8*W8]
 
+def save_checkpoint_safe(checkpoint, path):
+    """Atomic checkpoint save - prevents corruption on crash."""
+    temp_path = path + ".tmp"
+    torch.save(checkpoint, temp_path)
+    os.replace(temp_path, path)  # Atomic on all platforms
+
 
 def compute_patch_grid(image_shape, patch_size):
     """

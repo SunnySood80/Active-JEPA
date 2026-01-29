@@ -120,7 +120,7 @@ class PPO:
         gae_lambda: float = 0.95,
         clip_epsilon: float = 0.2,
         value_coef: float = 0.5,
-        entropy_coef: float = 0.15, # was 0.01
+        entropy_coef: float = 0.01, # was 0.15, for no scheduling it was .05
         max_grad_norm: float = 0.5,
         n_epochs: int = 5,
         batch_size: int = 64,

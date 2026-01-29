@@ -138,15 +138,27 @@ def calculate_semantic_coherence(feature_maps_patches, action, n_patches_h, n_pa
         return 0.0
     
 def compute_scatter_reward(mask_state, n_patches_h, n_patches_w):
-
     mask_2d = mask_state.reshape(n_patches_h, n_patches_w)
     labeled_mask, num_components = label(mask_2d)
     
     num_masked = int(mask_2d.sum())
-    if num_masked == 0:
-        return 0.0
     
-    base_score = float(num_components / num_masked)
+    # SAFETY 1: Early-episode protection (wait for at least 4 patches)
+    if num_masked < 4:
+        return 0.5
+    
+    # SAFETY 2: Zero check (though < 4 catches this)
+    if num_masked == 0:
+        return 0.5
+    
+    # SAFETY 3: Clip to valid range
+    base_score = float(num_components) / float(num_masked)
+    base_score = np.clip(base_score, 0.0, 1.0)
+    
+    # SAFETY 4: NaN/inf check
+    if np.isnan(base_score) or np.isinf(base_score):
+        return 0.5
+    
     return base_score
 
 
@@ -165,7 +177,7 @@ def get_current_weights(current_stepm=None, total_steps=None,
     
     return alpha, beta
 
-def calculate_jepa_rewards(episodes, jepa_outputs):
+def calculate_jepa_rewards(episodes, jepa_outputs, current_epoch=0, max_epochs=10):
     """
     Calculate rewards for RL agent based on JEPA reconstruction errors.
     
@@ -176,9 +188,19 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
     Returns:
         all_rewards: List of reward lists, one per episode
     """
+
+
+    # ========== CURRICULUM: EASY → HARD ==========
+    # Aggression schedule: -1.0 (easy) → +1.0 (hard)
+    progress = current_epoch / max(1, max_epochs - 1)  # 0.0 to 1.0
+    aggression = -1.0 + (2.0 * progress)  # -1.0 → +1.0
+    
+    # Clamp to valid range
+    aggression = np.clip(aggression, -1.0, 1.0)
+
+    
     all_rewards = []
     all_pixel_rewards = []
-    all_denoise_rewards = []
     all_scatter_rewards = []
     all_final_rewards = []
 
@@ -186,7 +208,6 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
     for i, episode in enumerate(episodes):
         episode_rewards = []
         episode_pixel_rewards = []
-        episode_denoise_rewards = []
         episode_scatter_rewards = []
         episode_final = []
         
@@ -194,7 +215,6 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
         pixel_errors = jepa_outputs['pixel_errors'][i]  # [N] reconstruction errors per pixel (numpy)
         feature_maps_cpu = jepa_outputs['features'][i]   # [D, H8, W8] already on CPU
         mask_indices = jepa_outputs['mask_indices'][i]  # [M] already on CPU
-        denoise_error_map = jepa_outputs['denoised_error'][i]
 
         # Get valid mask indices (filter out padding -1s) - already on CPU
         valid_indices = mask_indices[mask_indices >= 0].numpy()
@@ -211,16 +231,7 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
         n_patches_h = H8 // patch_size  # Number of patches vertically
         n_patches_w = W8 // patch_size  # Number of patches horizontally
 
-        H4, W4 = denoise_error_map.shape
-        denoise_patch_h = H4 // patch_size
-        denoise_patch_w = W4 // patch_size
 
-        # CRITICAL OPTIMIZATION: Reshape feature_maps ONCE per episode, not per action
-        # Reshape from [D, H8, W8] to [n_patches_h, n_patches_w, D] by averaging over patch pixels
-        # feature_maps_reshaped = feature_maps_cpu.view(D, n_patches_h, patch_size, n_patches_w, patch_size)
-        # feature_maps_patches = feature_maps_reshaped.mean(dim=(2, 4))  # [D, n_patches_h, n_patches_w]
-        # feature_maps_patches = feature_maps_patches.permute(1, 2, 0)  # [n_patches_h, n_patches_w, D]
-        
         # For each action, find its pixels and aggregate their errors
         for j, action in enumerate(episode['actions']):
             # Convert action (patch ID) to patch coordinates
@@ -238,15 +249,6 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
             h_end = min(h_start + patch_size, H8)
             w_start = pw * patch_size
             w_end = min(w_start + patch_size, W8)
-
-            # DENOISE REWARD
-            dh_start = ph * denoise_patch_h
-            dh_end = min((ph + 1) * denoise_patch_h, H4)
-            dw_start = pw * denoise_patch_w  
-            dw_end = min((pw + 1) * denoise_patch_w, W4)
-            
-            denoised_patch_errors = float(denoise_error_map[dh_start:dh_end, dw_start:dw_end].mean())
-            denoise_reward = denoised_patch_errors
 
             # PIXEL REWARD
             patch_errors = []
@@ -268,7 +270,6 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
 
             # Store for analysis
             episode_pixel_rewards.append(pixel_reward)
-            episode_denoise_rewards.append(denoise_reward)
 
         # NEW (computes scatter after each action):
         for j, action in enumerate(episode['actions']):
@@ -284,33 +285,46 @@ def calculate_jepa_rewards(episodes, jepa_outputs):
         
         # ========== NORMALIZE AND COMBINE ==========
         np_pixel = np.array(episode_pixel_rewards)
-        np_denoise = np.array(episode_denoise_rewards)
         np_scatter = np.array(episode_scatter_rewards)
         
         pixel_norm = (np_pixel - np_pixel.min()) / (np_pixel.max() - np_pixel.min() + 1e-8) if np_pixel.max() > np_pixel.min() else np_pixel
-        denoise_norm = (np_denoise - np_denoise.min()) / (np_denoise.max() - np_denoise.min() + 1e-8) if np_denoise.max() > np_denoise.min() else np_denoise
         scatter_norm = np_scatter  # Already 0-1, no normalization needed
+
+        # ========== CURRICULUM ADJUSTMENT ==========
+        # Get the absolute strength of the curriculum (0.0 to 1.0)
+        strength = abs(aggression)
+
+        if aggression < 0:
+            # === NURSE MODE (Find Easy Stuff) ===
+            # Flip the logic: We want (1 - Error) to be the reward.
+            # If Error is 0 (Sky), Reward is 1.0.
+            pixel_curriculum = (1.0 - pixel_norm) * strength
+            
+        else:
+            # === SNIPER MODE (Find Hard Stuff) ===
+            # Keep logic: We want Error to be the reward.
+            # If Error is 1.0 (Car), Reward is 1.0.
+            pixel_curriculum = pixel_norm * strength
         
         # Combine with weights
-        alpha = 0.5  # pixel
-        beta = 0.0   # denoise
-        gamma = 0.5  # scatter
-        
-        episode_rewards = list(alpha * pixel_norm + beta * denoise_norm + gamma * scatter_norm)
-        
+        alpha = 0.7  # pixel
+        gamma = 0.3   # scatter
+
+        episode_rewards = list(alpha * pixel_curriculum + gamma * scatter_norm)
+
         all_rewards.append(episode_rewards)
         all_pixel_rewards.append(pixel_norm.tolist())
-        all_denoise_rewards.append(denoise_norm.tolist())
         all_scatter_rewards.append(scatter_norm.tolist())
         all_final_rewards.append(episode_rewards)
 
     # Return rewards + component breakdown
     return all_rewards, {
         'pixel_rewards': all_pixel_rewards,
-        'denoise_rewards': all_denoise_rewards,
         'scatter_rewards': all_scatter_rewards,
         'final_rewards': all_final_rewards,
+        'aggression': aggression
     }
+
 class MaskingAgentTrainer:
 
     def __init__(self, fi1_shape, mask_ratio=0.5, patch_size=8, feature_dim=None, device='cuda'):
@@ -329,9 +343,9 @@ class MaskingAgentTrainer:
 
         return masks, episodes
     
-    def update_agent(self, episodes, jepa_outputs):
+    def update_agent(self, episodes, jepa_outputs, current_epoch=0, max_epochs=10):
         # Get rewards and component breakdown
-        jepa_rewards, reward_components = calculate_jepa_rewards(episodes, jepa_outputs)
+        jepa_rewards, reward_components = calculate_jepa_rewards(episodes, jepa_outputs, current_epoch=current_epoch, max_epochs=max_epochs)
         
         all_states = []
         all_actions = []
@@ -343,7 +357,6 @@ class MaskingAgentTrainer:
         # Collect all rewards (normalized)
         all_rewards_flat = []
         all_pixel_flat = []
-        all_denoise_flat = []
         all_final_flat = []
         all_scatter_flat = []
         
@@ -353,9 +366,9 @@ class MaskingAgentTrainer:
             
             # Component rewards
             all_pixel_flat.extend(reward_components['pixel_rewards'][i])
-            all_denoise_flat.extend(reward_components['denoise_rewards'][i])
             all_scatter_flat.extend(reward_components['scatter_rewards'][i])
             all_final_flat.extend(reward_components['final_rewards'][i])
+            
             
             all_states.extend(episode['states'])
             all_actions.extend(episode['actions'])
@@ -390,14 +403,13 @@ class MaskingAgentTrainer:
             
             print(f"\n{'='*80}")
             print(f"[RL METRICS] Update {self._update_counter}")
+            print(f"📚 CURRICULUM: Aggression = {reward_components.get('aggression', 0.0):.2f}")  # NEW
             print(f"{'='*80}")
             
             # REWARD COMPONENTS
             print(f"\n💰 REWARD COMPONENTS (α={alpha:.2f} β={beta:.2f}):")
             print(f"  Pixel:    mean={np.mean(all_pixel_flat):.4f} std={np.std(all_pixel_flat):.4f} "
                 f"range=[{np.min(all_pixel_flat):.4f}, {np.max(all_pixel_flat):.4f}]")
-            print(f"  Denoise:  mean={np.mean(all_denoise_flat):.4f} std={np.std(all_denoise_flat):.4f} "
-                f"range=[{np.min(all_denoise_flat):.4f}, {np.max(all_denoise_flat):.4f}]")
             print(f"  Scatter:  mean={np.mean(all_scatter_flat):.4f} std={np.std(all_scatter_flat):.4f} "
                 f"range=[{np.min(all_scatter_flat):.4f}, {np.max(all_scatter_flat):.4f}]")
             print(f"  Combined: mean={np.mean(all_final_flat):.4f} std={np.std(all_final_flat):.4f} "
